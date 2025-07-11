@@ -69,19 +69,22 @@ def parse_arguments():
 def read_smiles(data_path, smile_col="rdkit_no_salt", id_col="prestwick_ID"):
 
     """
-    Read SMILES data from a file and remove invalid SMILES.
+    Read SMILES data from a file or DataFrame and remove invalid SMILES.
 
     Parameters:
-    - data_path (str): Path to the file containing SMILES data.
-    - smile_col (str, optional): Name of the column containing SMILES strings (default is "rdkit_no_salt").
-    - id_col (str, optional): Name of the column containing molecule IDs (default is "prestwick_ID").
+    - data_path (str or pd.DataFrame): Path to the file or a DataFrame containing SMILES data.
+    - smile_col (str, optional): Name of the column containing SMILES strings.
+    - id_col (str, optional): Name of the column containing molecule IDs.
 
     Returns:
     - smile_df (pandas.DataFrame): DataFrame containing SMILES data with specified columns.
     """
     
     # Read the data
-    smile_df = pd.read_csv(data_path, sep='\t')
+    if isinstance(data_path, pd.DataFrame):
+        smile_df = data_path.copy()
+    else:
+        smile_df = pd.read_csv(data_path, sep='\t')
     smile_df = smile_df[[smile_col, id_col]]
 
     # Make sure ID column is interpreted as str
