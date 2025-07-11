@@ -1,0 +1,20 @@
+services:
+  mole:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: hotwa/mole_antimicrobial_potential:latest
+    container_name: mole_antimicrobial_potential
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ./:/workspace/mole_antimicrobial_potential
+    working_dir: /workspace/mole_antimicrobial_potential
+    tty: true
+    stdin_open: true
+    command: tail -f /dev/null
