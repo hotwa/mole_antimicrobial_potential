@@ -32,6 +32,7 @@ services:
       dockerfile: docker/Dockerfile
     image: hotwa/mole_antimicrobial_potential:latest
     container_name: mole_mcp
+    restart: unless-stopped
     deploy:
       resources:
         reservations:
