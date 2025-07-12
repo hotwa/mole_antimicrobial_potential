@@ -1,20 +1,54 @@
 services:
-  mole:
+  # mole_api:
+  #   build:
+  #     context: .
+  #     dockerfile: docker/Dockerfile
+  #   image: hotwa/mole_antimicrobial_potential:latest
+  #   container_name: mole_api
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - capabilities: [gpu]
+  #   environment:
+  #     - MODE=api
+  #     - HOST=0.0.0.0
+  #     - PORT=8000
+  #     - RELOAD=--reload
+  #     - WORKERS=1
+  #     - EXTRA_UVICORN_ARGS=
+  #     - NVIDIA_VISIBLE_DEVICES=all
+  #   volumes:
+  #     - ./ckpt:/workspace/mole_antimicrobial_potential/pretrained_model/model_ginconcat_btwin_100k_d8000_l0.0001 # include model.pth and config.yaml
+  #   working_dir: /workspace/mole_antimicrobial_potential
+  #   ports:
+  #     - "8000:8000"
+  #   tty: true
+  #   stdin_open: true
+
+  mole_mcp:
     build:
       context: .
       dockerfile: docker/Dockerfile
     image: hotwa/mole_antimicrobial_potential:latest
-    container_name: mole_antimicrobial_potential
+    container_name: mole_mcp
     deploy:
       resources:
         reservations:
           devices:
             - capabilities: [gpu]
     environment:
+      - MODE=mcp
+      - HOST=0.0.0.0
+      - PORT=9000
+      - RELOAD=                # 生产环境建议留空，不用热重载
+      - WORKERS=2
+      - EXTRA_UVICORN_ARGS=--log-level debug
       - NVIDIA_VISIBLE_DEVICES=all
     volumes:
-      - ./:/workspace/mole_antimicrobial_potential
+      - ./ckpt:/workspace/mole_antimicrobial_potential/pretrained_model/model_ginconcat_btwin_100k_d8000_l0.0001 # include model.pth and config.yaml
     working_dir: /workspace/mole_antimicrobial_potential
+    ports:
+      - "9000:9000"
     tty: true
     stdin_open: true
-    command: tail -f /dev/null

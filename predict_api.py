@@ -164,7 +164,117 @@ class AntimicrobialPredictor:
         return apscore_total.join(apscore_gram).join(inhibted_total).join(inhibted_gram)
     
     async def predict(self, input_data: MoleculeInput):
-        """Main prediction function that processes input and returns results"""
+        """
+        预测小分子的抗菌潜力。（MCP工具标准接口，支持多种调用风格，详见下方用法示例）
+
+        参数:
+            input: MoleculeInput
+                - smiles: str | List[str]    分子的SMILES字符串，或SMILES字符串列表
+                - aggregate_scores: bool     是否聚合输出（True返回广谱/统计分数，False返回每个菌株概率，默认False）
+                - chem_id: str | List[str]   可选，化合物自定义ID，和smiles一一对应
+                - app_threshold: float       可选，抑制阈值，决定growth_inhibition
+                - min_nkill: int             可选，定义广谱的“被抑制菌株数”下限
+                - molecules: List[dict]      结构化输入，每个dict含smiles/chem_id（优先于上面参数）
+
+        返回:
+            PredictionResult
+                - 若aggregate_scores=False: 返回每个分子的每个菌株预测概率/抑制情况
+                - 若aggregate_scores=True:  返回每个分子的抗菌分数、抑制数、广谱判断
+
+        用法示例:
+            1. 单分子预测（默认菌株概率）
+            >>> predict({"smiles": "CCO"})
+            # 返回:
+            [
+                {
+                    "pred_id": "mol1:Akkermansia muciniphila (NT5021)",
+                    "antimicrobial_predictive_probability": 2.5e-6,
+                    "growth_inhibition": 0
+                },
+                ...
+            ]
+
+            2. 单分子，聚合分数（只关心广谱结果）
+            >>> predict({"smiles": "CCO", "aggregate_scores": True})
+            # 返回:
+            [
+                {
+                    "chem_id": "mol1",
+                    "apscore_total": -11.7,
+                    "apscore_gnegative": -11.6,
+                    "apscore_gpositive": -11.8,
+                    "ginhib_total": 0,
+                    "ginhib_gnegative": 0,
+                    "ginhib_gpositive": 0,
+                    "broad_spectrum": 0
+                }
+            ]
+
+            3. 多分子预测（SMILES数组）
+            >>> predict({"smiles": ["CCO", "CCN"]})
+            # 返回:
+            [
+                ...  # mol1/molecule1的每个菌株概率
+                ...  # mol2/molecule2的每个菌株概率
+            ]
+
+            4. 多分子+聚合统计
+            >>> predict({"smiles": ["CCO", "CCN"], "aggregate_scores": True})
+            # 返回:
+            [
+                {"chem_id": "mol1", ...},
+                {"chem_id": "mol2", ...}
+            ]
+
+            5. 自定义ID（chem_id与smiles一一对应）
+            >>> predict({
+                    "smiles": ["CCO", "CCN"],
+                    "chem_id": ["ethanol", "ethylamine"],
+                    "aggregate_scores": True
+                })
+            # 返回:
+            [
+                {"chem_id": "ethanol", ...},
+                {"chem_id": "ethylamine", ...}
+            ]
+
+            6. 结构化molecules用法（推荐复杂场景）
+            >>> predict({
+                    "molecules": [
+                        {"smiles": "CCO", "chem_id": "ethanol"},
+                        {"smiles": "CCN", "chem_id": "ethylamine"}
+                    ],
+                    "aggregate_scores": True
+                })
+            # 返回:
+            [
+                {"chem_id": "ethanol", ...},
+                {"chem_id": "ethylamine", ...}
+            ]
+
+            7. 自定义阈值和广谱下限
+            >>> predict({
+                    "smiles": "CCO",
+                    "aggregate_scores": True,
+                    "app_threshold": 0.1,
+                    "min_nkill": 5
+                })
+
+        返回字段说明:
+            - pred_id: 分子ID+菌株名称（如ethanol:Escherichia coli ...），仅aggregate_scores=False
+            - antimicrobial_predictive_probability: 对每个菌株的抗菌预测概率
+            - growth_inhibition: 0/1，是否被判定为抑制（概率高于阈值）
+            - chem_id: 分子的自定义ID或mol1/mol2编号
+            - apscore_total: 统计分数（越低越抗菌，需领域知识解读）
+            - ginhib_total: 被抑制的菌株数
+            - broad_spectrum: 0/1，是否“广谱抑制剂”
+
+        注意:
+            - 推荐聚合分数结果用于决策（aggregate_scores=True）。
+            - 可混合用molecules结构体和smiles数组方式。
+            - 不同分子/ID的输出顺序与输入一致。
+            - MCP/LLM客户端可用工具发现和schema获取所有字段与默认值。
+        """
         # Get MolE representation
         mole_representation = self._get_mole_representation(input_data)
         

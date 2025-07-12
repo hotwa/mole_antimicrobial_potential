@@ -28,6 +28,12 @@ COPY environment.yaml environment.yaml
 RUN micromamba env create -f environment.yaml -n mole -y && \
     micromamba clean -a -y
 
+ENV MODE=api
+ENV HOST=0.0.0.0
+ENV PORT=8000
+ENV RELOAD=--reload
+ENV WORKERS=1
+
 # 7. 让micromamba shell自动激活环境（bash、ipython、python等都继承环境）
 SHELL ["/usr/local/bin/micromamba", "run", "-n", "mole", "/bin/bash", "-c"]
 
