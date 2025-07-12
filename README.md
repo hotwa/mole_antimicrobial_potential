@@ -194,3 +194,40 @@ The complete output can be found in `examples/output/example_molecules_predictio
 - **ginhib_gpositive**: Is the total amount Gram Positive strains that are predicted to be inhibited by each compound.
 - **ginhib_gnegative**: Is the total amount Gram Negative strains that are predicted to be inhibited by each compound.
 - **broad_spectrum**: Is a binary column indicating whether the compound is predicted to be a broad spectrum antimicrobial (1) or not (0). This is done by thresholding the total amount of strains predicted to be inhibited (**ginhib_total**). By default if a compound is predicted to inhibit $\geq$ 10 strains, then it is predicted to have broad spectrum activity.
+
+## Docker Compose Usage
+
+To build and run the service using Docker Compose:
+
+```shell
+docker compose build
+docker compose up -d
+```
+
+### Environment Variables
+
+You can configure the service using the following environment variables in your docker-compose.yml or via the command line. These allow you to easily switch between standard API mode and MCP protocol mode, as well as customize network and runtime settings.
+
+| Variable             | Default Value | Description                                                                             |
+| -------------------- | ------------- | --------------------------------------------------------------------------------------- |
+| `MODE`               | `api`         | Startup mode: `api` (legacy REST API) or `mcp` (Model Context Protocol standard server) |
+| `HOST`               | `0.0.0.0`     | Host address to bind the service                                                        |
+| `PORT`               | `8000`        | Port number for the service                                                             |
+| `RELOAD`             | *(empty)*     | Hot reload for development: set to `--reload` to enable (not recommended in production) |
+| `WORKERS`            | `1`           | Number of server worker processes                                                       |
+| `TRANSPORT`          | `http`        | (MCP mode only) MCP transport protocol: `http`, `sse`, or `stdio`                       |
+| `EXTRA_UVICORN_ARGS` | *(empty)*     | (API mode only) Additional arguments for `uvicorn` server                               |
+| `EXTRA_FASTMCP_ARGS` | *(empty)*     | (MCP mode only) Additional arguments for the `fastmcp` server                           |
+
+
+Example: To run the MCP server on port 9000 using SSE transport, add the following to your service:
+
+```yaml
+environment:
+  - MODE=mcp
+  - HOST=0.0.0.0
+  - PORT=9000
+  - TRANSPORT=sse
+```
+
+You can further customize arguments by setting EXTRA_UVICORN_ARGS or EXTRA_FASTMCP_ARGS as needed.
