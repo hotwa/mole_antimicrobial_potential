@@ -40,7 +40,7 @@ services:
     environment:
       - MODE=mcp
       - HOST=0.0.0.0
-      - PORT=9000
+      - PORT=8000
       - RELOAD=                # 生产环境建议留空，不用热重载
       - WORKERS=2
       - EXTRA_UVICORN_ARGS=--log-level debug
@@ -49,6 +49,6 @@ services:
       - ./ckpt:/workspace/mole_antimicrobial_potential/pretrained_model/model_ginconcat_btwin_100k_d8000_l0.0001 # include model.pth and config.yaml
     working_dir: /workspace/mole_antimicrobial_potential
     ports:
-      - "9000:9000"
+      - "8000:8000"
     tty: true
     stdin_open: true

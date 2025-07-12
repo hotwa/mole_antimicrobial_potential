@@ -36,6 +36,6 @@ ENV WORKERS=1
 
 # 7. 让micromamba shell自动激活环境（bash、ipython、python等都继承环境）
 SHELL ["/usr/local/bin/micromamba", "run", "-n", "mole", "/bin/bash", "-c"]
-
+ENTRYPOINT [ "/usr/local/bin/micromamba", "run", "-n", "mole" ]
 # 8. 默认进入bash
-CMD ["/start.sh"]
+CMD ["./start.sh"]
