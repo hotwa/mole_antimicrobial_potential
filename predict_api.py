@@ -5,17 +5,43 @@ import pickle
 import torch
 import numpy as np
 import pandas as pd
+import asyncio
+import logging
 from typing import List, Union, Optional
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from scipy.stats.mstats import gmean
 from sklearn.preprocessing import OneHotEncoder
 from mole_representation import process_representation
 
+# 配置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# RDKit用于SMILES验证
+try:
+    from rdkit import Chem
+    RDKit_AVAILABLE = True
+except ImportError:
+    RDKit_AVAILABLE = False
+    logger.warning("RDKit not available, SMILES validation disabled")
+
 class MoleculeInfo(BaseModel):
     smiles: str
     chem_id: Optional[str] = None
+    
+    @validator('smiles')
+    def validate_smiles(cls, v):
+        """Validate SMILES format"""
+        if not v or not isinstance(v, str):
+            raise ValueError("SMILES must be a non-empty string")
+        
+        if RDKit_AVAILABLE:
+            mol = Chem.MolFromSmiles(v)
+            if mol is None:
+                raise ValueError(f"Invalid SMILES string: {v}")
+        return v
 
 class MoleculeInput(BaseModel):
     molecules: Optional[List[MoleculeInfo]] = None
@@ -24,9 +50,62 @@ class MoleculeInput(BaseModel):
     aggregate_scores: bool = Field(False, description="Whether to aggregate predictions")
     app_threshold: float = Field(0.04374140128493309, description="Threshold for growth inhibition")
     min_nkill: int = Field(10, description="Minimum strains for broad spectrum")
+    
+    @validator('smiles')
+    def validate_smiles_input(cls, v):
+        """Validate smiles input"""
+        if v is None:
+            return v
+            
+        if isinstance(v, str):
+            if RDKit_AVAILABLE:
+                mol = Chem.MolFromSmiles(v)
+                if mol is None:
+                    raise ValueError(f"Invalid SMILES: {v}")
+        elif isinstance(v, list):
+            if len(v) == 0:
+                raise ValueError("SMILES list cannot be empty")
+            if RDKit_AVAILABLE:
+                for smiles in v:
+                    mol = Chem.MolFromSmiles(smiles)
+                    if mol is None:
+                        raise ValueError(f"Invalid SMILES in list: {smiles}")
+        return v
+    
+    @validator('chem_id')
+    def validate_chem_id(cls, v):
+        """Validate chem_id matches smiles count"""
+        return v
+    
+    @validator('molecules')
+    def validate_molecules(cls, v):
+        """Validate molecules list"""
+        if v is None:
+            return v
+        if len(v) == 0:
+            raise ValueError("Molecules list cannot be empty")
+        return v
+    
+    @validator('app_threshold')
+    def validate_threshold(cls, v):
+        """Validate threshold is in valid range"""
+        if not (0 <= v <= 1):
+            raise ValueError("app_threshold must be between 0 and 1")
+        return v
+    
+    @validator('min_nkill')
+    def validate_min_nkill(cls, v):
+        """Validate min_nkill is positive"""
+        if v < 0:
+            raise ValueError("min_nkill must be non-negative")
+        return v
+    
+    class Config:
+        # Allow type coercion
+        coerce = True
 
 class AntimicrobialPredictor:
-    """Service for antimicrobial activity prediction"""
+    """Service for antimicrobial activity prediction with async loading"""
     
     def __init__(self):
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -35,15 +114,61 @@ class AntimicrobialPredictor:
         self.strain_categories = "data/01.prepare_training_data/maier_screening_results.tsv.gz"
         self.gram_information = "raw_data/maier_microbiome/strain_info_SF2.xlsx"
         
-        # Load model once at initialization
-        self.model = self._load_xgb_model()
+        # Async loading state
+        self._model_loaded = False
+        self._load_task = None
+        self._loading_lock = asyncio.Lock()
         
-        # Load strain data
-        self.maier_screen = pd.read_csv(self.strain_categories, sep='\t', index_col=0)
-        self.strain_ohe = self._prep_ohe(self.maier_screen.columns)
+        # Initialize without blocking
+        self.model = None
+        self.maier_screen = None
+        self.strain_ohe = None
+        
+        # Start background loading
+        asyncio.create_task(self._async_init())
+    
+    async def _async_init(self):
+        """Asynchronously initialize models and data"""
+        async with self._loading_lock:
+            if self._model_loaded:
+                return
+            
+            logger.info("Starting async model loading...")
+            try:
+                # Load XGBoost model
+                loop = asyncio.get_event_loop()
+                self.model = await loop.run_in_executor(None, self._load_xgb_model)
+                
+                # Load strain data
+                self.maier_screen = await loop.run_in_executor(
+                    None, 
+                    lambda: pd.read_csv(self.strain_categories, sep='\t', index_col=0)
+                )
+                self.strain_ohe = await loop.run_in_executor(
+                    None, 
+                    self._prep_ohe, 
+                    self.maier_screen.columns
+                )
+                
+                self._model_loaded = True
+                logger.info("Model loading completed successfully")
+            except Exception as e:
+                logger.error(f"Failed to load models: {e}")
+                raise
+    
+    async def ensure_loaded(self):
+        """Ensure models are loaded before prediction"""
+        if not self._model_loaded:
+            async with self._loading_lock:
+                if not self._model_loaded:
+                    await self._async_init()
     
     def _load_xgb_model(self):
-        """Load XGBoost model"""
+        """Load XGBoost model (sync)"""
+        logger.info(f"Loading XGBoost model from {self.xgboost_model_path}")
+        if not os.path.exists(self.xgboost_model_path):
+            raise FileNotFoundError(f"Model file not found: {self.xgboost_model_path}")
+        
         with open(self.xgboost_model_path, "rb") as file:
             return pickle.load(file)
     
@@ -180,109 +305,43 @@ class AntimicrobialPredictor:
             PredictionResult
                 - 若aggregate_scores=False: 返回每个分子的每个菌株预测概率/抑制情况
                 - 若aggregate_scores=True:  返回每个分子的抗菌分数、抑制数、广谱判断
-
-        用法示例:
-            1. 单分子预测（默认菌株概率）
-            >>> predict({"smiles": "CCO"})
-            # 返回:
-            [
-                {
-                    "pred_id": "mol1:Akkermansia muciniphila (NT5021)",
-                    "antimicrobial_predictive_probability": 2.5e-6,
-                    "growth_inhibition": 0
-                },
-                ...
-            ]
-
-            2. 单分子，聚合分数（只关心广谱结果）
-            >>> predict({"smiles": "CCO", "aggregate_scores": True})
-            # 返回:
-            [
-                {
-                    "chem_id": "mol1",
-                    "apscore_total": -11.7,
-                    "apscore_gnegative": -11.6,
-                    "apscore_gpositive": -11.8,
-                    "ginhib_total": 0,
-                    "ginhib_gnegative": 0,
-                    "ginhib_gpositive": 0,
-                    "broad_spectrum": 0
-                }
-            ]
-
-            3. 多分子预测（SMILES数组）
-            >>> predict({"smiles": ["CCO", "CCN"]})
-            # 返回:
-            [
-                ...  # mol1/molecule1的每个菌株概率
-                ...  # mol2/molecule2的每个菌株概率
-            ]
-
-            4. 多分子+聚合统计
-            >>> predict({"smiles": ["CCO", "CCN"], "aggregate_scores": True})
-            # 返回:
-            [
-                {"chem_id": "mol1", ...},
-                {"chem_id": "mol2", ...}
-            ]
-
-            5. 自定义ID（chem_id与smiles一一对应）
-            >>> predict({
-                    "smiles": ["CCO", "CCN"],
-                    "chem_id": ["ethanol", "ethylamine"],
-                    "aggregate_scores": True
-                })
-            # 返回:
-            [
-                {"chem_id": "ethanol", ...},
-                {"chem_id": "ethylamine", ...}
-            ]
-
-            6. 结构化molecules用法（推荐复杂场景）
-            >>> predict({
-                    "molecules": [
-                        {"smiles": "CCO", "chem_id": "ethanol"},
-                        {"smiles": "CCN", "chem_id": "ethylamine"}
-                    ],
-                    "aggregate_scores": True
-                })
-            # 返回:
-            [
-                {"chem_id": "ethanol", ...},
-                {"chem_id": "ethylamine", ...}
-            ]
-
-            7. 自定义阈值和广谱下限
-            >>> predict({
-                    "smiles": "CCO",
-                    "aggregate_scores": True,
-                    "app_threshold": 0.1,
-                    "min_nkill": 5
-                })
-
-        返回字段说明:
-            - pred_id: 分子ID+菌株名称（如ethanol:Escherichia coli ...），仅aggregate_scores=False
-            - antimicrobial_predictive_probability: 对每个菌株的抗菌预测概率
-            - growth_inhibition: 0/1，是否被判定为抑制（概率高于阈值）
-            - chem_id: 分子的自定义ID或mol1/mol2编号
-            - apscore_total: 统计分数（越低越抗菌，需领域知识解读）
-            - ginhib_total: 被抑制的菌株数
-            - broad_spectrum: 0/1，是否“广谱抑制剂”
-
-        注意:
-            - 推荐聚合分数结果用于决策（aggregate_scores=True）。
-            - 可混合用molecules结构体和smiles数组方式。
-            - 不同分子/ID的输出顺序与输入一致。
-            - MCP/LLM客户端可用工具发现和schema获取所有字段与默认值。
         """
-        # Get MolE representation
-        mole_representation = self._get_mole_representation(input_data)
+        # Ensure models are loaded
+        await self.ensure_loaded()
+        
+        # Validate input
+        if not input_data.smiles and not input_data.molecules:
+            raise HTTPException(status_code=400, detail="Either smiles or molecules must be provided")
+        
+        # Get MolE representation (with timeout)
+        try:
+            mole_representation = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None, 
+                    self._get_mole_representation, 
+                    input_data
+                ), 
+                timeout=60  # 60秒超时
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=408, detail="MolE representation generation timeout")
         
         # Prepare strain-level predictions
         X_input = self._add_strains(mole_representation)
         
-        # Make predictions
-        y_pred = self.model.predict_proba(X_input)
+        # Make predictions (with timeout)
+        try:
+            y_pred = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None,
+                    self.model.predict_proba,
+                    X_input
+                ),
+                timeout=30  # 30秒超时
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=408, detail="Prediction timeout")
+        
         pred_df = pd.DataFrame(y_pred, columns=["0", "1"], index=X_input.index)
         
         # Binarize predictions using threshold
@@ -310,11 +369,17 @@ class AntimicrobialPredictor:
             # Convert to records for JSON serialization
             return pred_df.reset_index().to_dict(orient="records")
 
+# Import health check
+from health_check import add_health_check
+
 # Create FastAPI app
 app = FastAPI(title="Antimicrobial Prediction MCP Tool")
 
 # Initialize predictor service
 predictor = AntimicrobialPredictor()
+
+# Add health check endpoints
+add_health_check(app, predictor)
 
 @app.post("/mcp")
 async def mcp_endpoint(request: Request):

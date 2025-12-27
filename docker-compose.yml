@@ -44,12 +44,20 @@ services:
       - PORT=8000
       - RELOAD=                # 生产环境建议留空，不用热重载
       - WORKERS=2
-      - EXTRA_UVICORN_ARGS=--log-level debug
+      - EXTRA_UVICORN_ARGS=--log-level info
       - NVIDIA_VISIBLE_DEVICES=all
     volumes:
-      - ./ckpt:/workspace/mole_antimicrobial_potential/pretrained_model/model_ginconcat_btwin_100k_d8000_l0.0001 # include model.pth and config.yaml
+      - ./ckpt:/workspace/mole_antimicrobial_potential/pretrained_model/model_ginconcat_btwin_100k_d8000_l0.0001 # model.pth and config.yaml
+      - ./data:/workspace/mole_antimicrobial_potential/data # XGBoost model and strain data
+      - ./raw_data:/workspace/mole_antimicrobial_potential/raw_data # strain info
     working_dir: /workspace/mole_antimicrobial_potential
     ports:
       - "8000:8000"
     tty: true
     stdin_open: true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s

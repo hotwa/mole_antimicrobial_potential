@@ -14,17 +14,12 @@ ENV PATH=$MAMBA_ROOT_PREFIX/bin:$PATH
 RUN wget -qO- https://micromamba.snakepit.net/api/micromamba/linux-64/latest | tar -xvj -C /usr/local/bin --strip-components=1 bin/micromamba
 
 # 3. 设置工作目录
-WORKDIR /workspace
-
-# 4. 克隆项目
-RUN git clone https://github.com/hotwa/mole_antimicrobial_potential.git
-
 WORKDIR /workspace/mole_antimicrobial_potential
 
-# 5. 复制环境文件到容器（如果你本地有更新的environment.yaml，build时会覆盖仓库里的同名文件）
-COPY environment.yaml environment.yaml
+# 4. 复制项目文件到容器（使用本地文件，而不是克隆）
+COPY . .
 
-# 6. 用micromamba创建环境
+# 5. 用micromamba创建环境
 RUN micromamba env create -f environment.yaml -n mole -y && \
     micromamba clean -a -y
 

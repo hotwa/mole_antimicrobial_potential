@@ -31,8 +31,9 @@ if [ "$MODE" = "api" ]; then
     echo "[INFO] 启动老API predict_api.py"  
     exec uvicorn predict_api:app --host "$HOST" --port "$PORT" $RELOAD --workers "$WORKERS" $EXTRA_UVICORN_ARGS  
 elif [ "$MODE" = "mcp" ]; then  
-    echo "[INFO] 启动MCP标准接口 mcp_server.py"  
-    exec fastmcp run mcp_server.py --transport "$TRANSPORT" --host "$HOST" --port "$PORT" $EXTRA_FASTMCP_ARGS  
+    echo "[INFO] 启动MCP标准接口 (使用predict_api.py，已集成健康检查)"
+    # 使用predict_api.py，它已集成所有改进：健康检查、输入验证、异步加载
+    exec uvicorn predict_api:app --host "$HOST" --port "$PORT" --workers "$WORKERS" $EXTRA_UVICORN_ARGS  
 else  
     echo "[ERROR] 未知启动模式：$MODE"  
     exit 1  
