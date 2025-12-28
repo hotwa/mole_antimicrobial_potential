@@ -59,9 +59,3 @@ services:
       - "8001:8001"
     tty: true
     stdin_open: true
-    healthcheck:
-      test: ["CMD", "curl", "-f", "-H", "Accept: application/json, text/event-stream", "http://localhost:8001/mcp"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
