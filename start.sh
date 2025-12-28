@@ -2,40 +2,38 @@
 set -e  
   
 # 支持常用参数，均可通过环境变量传递，未传递时使用默认值  
-MODE="${MODE:-mcp}"         # 启动模式: api（老接口） 或 mcp（MCP标准）  
+MODE="${MODE:-api}"         # 启动模式: api (FastAPI) 或 mcp (FastMCP标准MCP)  
 HOST="${HOST:-0.0.0.0}"    # 监听地址  
-PORT="${PORT:-8000}"       # 端口  
-RELOAD="${RELOAD:-}"       # 是否开启 --reload，默认不开，可设为 "--reload"  
-WORKERS="${WORKERS:-1}"    # Uvicorn并发进程数，默认1  
-TRANSPORT="${TRANSPORT:-http}"  # MCP传输协议: stdio, http, sse  
-  
-# 额外参数（按模式分离）  
-EXTRA_UVICORN_ARGS="${EXTRA_UVICORN_ARGS:-}"      # API模式专用的uvicorn参数  
-EXTRA_FASTMCP_ARGS="${EXTRA_FASTMCP_ARGS:-}"      # MCP模式专用的fastmcp参数  
-  
+
+# FastAPI 配置
+PORT_API="${PORT_API:-8000}"       # API端口  
+WORKERS_API="${WORKERS_API:-2}"    # API并发进程数  
+
+# FastMCP 配置  
+PORT_MCP="${PORT_MCP:-8001}"       # MCP端口  
+MCP_TRANSPORT="${MCP_TRANSPORT:-http}"  # MCP传输协议: http, sse, stdio  
+
 # 打印当前配置  
 echo "[INFO] MODE: $MODE"  
 echo "[INFO] HOST: $HOST"  
-echo "[INFO] PORT: $PORT"  
-if [ "$MODE" = "api" ]; then  
-    echo "[INFO] RELOAD: $RELOAD"  
-    echo "[INFO] WORKERS: $WORKERS"  
-    echo "[INFO] EXTRA_UVICORN_ARGS: $EXTRA_UVICORN_ARGS"  
-elif [ "$MODE" = "mcp" ]; then  
-    echo "[INFO] TRANSPORT: $TRANSPORT"  
-    echo "[INFO] EXTRA_FASTMCP_ARGS: $EXTRA_FASTMCP_ARGS"  
-fi  
-  
+
 # 启动逻辑  
 if [ "$MODE" = "api" ]; then  
-    echo "[INFO] 启动老API predict_api.py"  
-    exec uvicorn predict_api:app --host "$HOST" --port "$PORT" $RELOAD --workers "$WORKERS" $EXTRA_UVICORN_ARGS  
+    echo "[INFO] 启动 FastAPI 服务"  
+    echo "[INFO] PORT_API: $PORT_API"  
+    echo "[INFO] WORKERS_API: $WORKERS_API"  
+    exec uvicorn predict_api:app --host "$HOST" --port "$PORT_API" --workers "$WORKERS_API"  
+  
 elif [ "$MODE" = "mcp" ]; then  
-    echo "[INFO] 启动MCP标准接口 (使用predict_api.py，已集成健康检查)"
-    # 使用predict_api.py，它已集成所有改进：健康检查、输入验证、异步加载
-    exec uvicorn predict_api:app --host "$HOST" --port "$PORT" --workers "$WORKERS" $EXTRA_UVICORN_ARGS  
+    echo "[INFO] 启动 FastMCP 标准 MCP 服务"  
+    echo "[INFO] PORT_MCP: $PORT_MCP"  
+    echo "[INFO] MCP_TRANSPORT: $MCP_TRANSPORT"  
+    # 强制单进程：不要用 uvicorn workers  
+    exec python mcp_server.py  
+  
 else  
     echo "[ERROR] 未知启动模式：$MODE"  
+    echo "[ERROR] 支持的模式: api, mcp"  
     exit 1  
 fi
 

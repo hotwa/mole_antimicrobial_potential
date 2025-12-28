@@ -1,35 +1,41 @@
 services:
-  # mole_api:
-  #   build:
-  #     context: .
-  #     dockerfile: docker/Dockerfile
-  #   image: hotwa/mole_antimicrobial_potential:latest
-  #   container_name: mole_api
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #           - capabilities: [gpu]
-  #   environment:
-  #     - MODE=api
-  #     - HOST=0.0.0.0
-  #     - PORT=8000
-  #     - RELOAD=--reload
-  #     - WORKERS=1
-  #     - EXTRA_UVICORN_ARGS=
-  #     - NVIDIA_VISIBLE_DEVICES=all
-  #   volumes:
-  #     - ./ckpt:/workspace/mole_antimicrobial_potential/pretrained_model/model_ginconcat_btwin_100k_d8000_l0.0001 # include model.pth and config.yaml
-  #   working_dir: /workspace/mole_antimicrobial_potential
-  #   ports:
-  #     - "8000:8000"
-  #   tty: true
-  #   stdin_open: true
-
-  mole_mcp:
+  # FastAPI 服务 - 保留现有 API 和自定义 SSE 端点
+  mole_api:
     build:
       context: .
       dockerfile: docker/Dockerfile
+    image: hotwa/mole_antimicrobial_potential:latest
+    container_name: mole_api
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    environment:
+      - MODE=api
+      - HOST=0.0.0.0
+      - PORT_API=8000
+      - WORKERS_API=2
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ./ckpt:/workspace/mole_antimicrobial_potential/pretrained_model/model_ginconcat_btwin_100k_d8000_l0.0001
+      - ./data:/workspace/mole_antimicrobial_potential/data
+      - ./raw_data:/workspace/mole_antimicrobial_potential/raw_data
+    working_dir: /workspace/mole_antimicrobial_potential
+    ports:
+      - "8000:8000"
+    tty: true
+    stdin_open: true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # FastMCP 服务 - 标准 MCP 协议
+  mole_mcp:
     image: hotwa/mole_antimicrobial_potential:latest
     container_name: mole_mcp
     restart: unless-stopped
@@ -41,22 +47,20 @@ services:
     environment:
       - MODE=mcp
       - HOST=0.0.0.0
-      - PORT=8000
-      - RELOAD=                # 生产环境建议留空，不用热重载
-      - WORKERS=2
-      - EXTRA_UVICORN_ARGS=--log-level info
+      - PORT_MCP=8001
+      - MCP_TRANSPORT=http
       - NVIDIA_VISIBLE_DEVICES=all
     volumes:
-      - ./ckpt:/workspace/mole_antimicrobial_potential/pretrained_model/model_ginconcat_btwin_100k_d8000_l0.0001 # model.pth and config.yaml
-      - ./data:/workspace/mole_antimicrobial_potential/data # XGBoost model and strain data
-      - ./raw_data:/workspace/mole_antimicrobial_potential/raw_data # strain info
+      - ./ckpt:/workspace/mole_antimicrobial_potential/pretrained_model/model_ginconcat_btwin_100k_d8000_l0.0001
+      - ./data:/workspace/mole_antimicrobial_potential/data
+      - ./raw_data:/workspace/mole_antimicrobial_potential/raw_data
     working_dir: /workspace/mole_antimicrobial_potential
     ports:
-      - "8000:8000"
+      - "8001:8001"
     tty: true
     stdin_open: true
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "-H", "Accept: application/json, text/event-stream", "http://localhost:8001/mcp"]
       interval: 30s
       timeout: 10s
       retries: 3
