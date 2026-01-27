@@ -1,0 +1,126 @@
+services:
+  mole_api_0:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.enhanced
+    image: hotwa/mole_antimicrobial_potential:enhanced
+    container_name: mole_api_0
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+    environment:
+      - MODE=api
+      - HOST=0.0.0.0
+      - PORT_API=8000
+      - WORKERS_API=1
+      - NVIDIA_VISIBLE_DEVICES=0
+      - MODEL_LOAD_MODE=resident
+      - MAX_CONCURRENT_REQUESTS=2
+    volumes:
+      - ./ckpt:/workspace/mole_antimicrobial_potential/pretrained_model/model_ginconcat_btwin_100k_d8000_l0.0001
+      - ./data:/workspace/mole_antimicrobial_potential/data
+      - ./raw_data:/workspace/mole_antimicrobial_potential/raw_data
+    working_dir: /workspace/mole_antimicrobial_potential
+    tty: true
+    stdin_open: true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  mole_api_1:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.enhanced
+    image: hotwa/mole_antimicrobial_potential:enhanced
+    container_name: mole_api_1
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['1']
+              capabilities: [gpu]
+    environment:
+      - MODE=api
+      - HOST=0.0.0.0
+      - PORT_API=8000
+      - WORKERS_API=1
+      - NVIDIA_VISIBLE_DEVICES=1
+      - MODEL_LOAD_MODE=resident
+      - MAX_CONCURRENT_REQUESTS=2
+    volumes:
+      - ./ckpt:/workspace/mole_antimicrobial_potential/pretrained_model/model_ginconcat_btwin_100k_d8000_l0.0001
+      - ./data:/workspace/mole_antimicrobial_potential/data
+      - ./raw_data:/workspace/mole_antimicrobial_potential/raw_data
+    working_dir: /workspace/mole_antimicrobial_potential
+    tty: true
+    stdin_open: true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  mole_lb:
+    image: nginx:latest
+    container_name: mole_lb
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - mole_api_0
+      - mole_api_1
+
+  mole_mcp:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.enhanced
+    image: hotwa/mole_antimicrobial_potential:enhanced
+    container_name: mole_mcp
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+    environment:
+      - MODE=mcp_enhanced
+      - HOST=0.0.0.0
+      - PORT_MCP=8001
+      - MCP_TRANSPORT=http
+      - NVIDIA_VISIBLE_DEVICES=0
+      - MODEL_LOAD_MODE=resident
+      - MAX_CONCURRENT_REQUESTS=2
+    volumes:
+      - ./ckpt:/workspace/mole_antimicrobial_potential/pretrained_model/model_ginconcat_btwin_100k_d8000_l0.0001
+      - ./data:/workspace/mole_antimicrobial_potential/data
+      - ./raw_data:/workspace/mole_antimicrobial_potential/raw_data
+    working_dir: /workspace/mole_antimicrobial_potential
+    ports:
+      - "8001:8001"
+    tty: true
+    stdin_open: true
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -sf -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":\"health\",\"method\":\"tools/list\"}' http://localhost:8001/mcp"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s

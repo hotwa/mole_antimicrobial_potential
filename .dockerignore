@@ -1,0 +1,65 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 数据文件（排除大部分，但保留必要的模型文件）
+data/04.new_predictions/
+data/05.analyze_mce_predictions/
+data/06.experimental_validation/
+data/07.pubchem_exploration/
+data/08.compare_mce_maier/
+raw_data/experimental_validation/
+raw_data/medchemexpress/
+raw_data/pubchem_random/
+pretrained_model/model_ginconcat_btwin_100k_d8000_l0.0001/model.pth
+
+# 模型文件（排除大部分，但保留必要的）
+*.pkl
+*.pth
+
+# 日志
+*.log
+service.log
+
+# 测试
+test_improvements.py
+*.test.py
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# 文档
+README.md
+README_API.md
+LICENSE
