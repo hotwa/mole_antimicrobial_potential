@@ -27,7 +27,17 @@ class AntimicrobialPredictor:
     """Predict antimicrobial activity with lazy async loading."""
 
     def __init__(self) -> None:
-        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        # 动态选择 GPU，根据 CUDA_VISIBLE_DEVICES
+        if torch.cuda.is_available():
+            cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+            if cuda_visible:
+                # 取第一个可用的 GPU
+                gpu_id = cuda_visible.split(",")[0].strip()
+                self.device = f"cuda:{gpu_id}"
+            else:
+                self.device = "cuda:0"
+        else:
+            self.device = "cpu"
         self.xgboost_model_path = (
             "data/03.model_evaluation/MolE-XGBoost-08.03.2024_14.20.pkl"
         )

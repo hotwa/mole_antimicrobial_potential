@@ -51,6 +51,7 @@ venv.bak/
 ckpt/**
 !ckpt/.gitkeep
 !ckpt/config.yaml
+!ckpt/model.pth
 
 # --- Logs & Temp ---
 *.log

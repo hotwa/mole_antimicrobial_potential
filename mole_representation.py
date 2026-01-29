@@ -58,8 +58,16 @@ def parse_arguments():
 
     # Determine device for MolE model
     if args.device == "auto":
-        args.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    
+        if torch.cuda.is_available():
+            cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+            if cuda_visible:
+                gpu_id = cuda_visible.split(",")[0].strip()
+                args.device = f"cuda:{gpu_id}"
+            else:
+                args.device = "cuda:0"
+        else:
+            args.device = "cpu"
+
     print(f"Using {args.device}")
 
     return args

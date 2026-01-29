@@ -5,23 +5,25 @@ services:
       dockerfile: docker/Dockerfile.enhanced
     image: hotwa/mole_antimicrobial_potential:enhanced
     container_name: mole_api_0
+    runtime: nvidia
     restart: unless-stopped
+    ports:
+      - "8000"
     deploy:
       resources:
         reservations:
           devices:
-            - driver: nvidia
-              device_ids: ['0']
-              capabilities: [gpu]
+            - capabilities: [gpu]
     environment:
       - MODE=api
       - HOST=0.0.0.0
       - PORT_API=8000
       - WORKERS_API=1
-      - NVIDIA_VISIBLE_DEVICES=0
+      - GPU_IDS=0
       - MODEL_LOAD_MODE=resident
       - MAX_CONCURRENT_REQUESTS=2
     volumes:
+      - ./start.sh:/workspace/mole_antimicrobial_potential/start.sh:ro
       - ./ckpt:/workspace/mole_antimicrobial_potential/pretrained_model/model_ginconcat_btwin_100k_d8000_l0.0001
       - ./data:/workspace/mole_antimicrobial_potential/data
       - ./raw_data:/workspace/mole_antimicrobial_potential/raw_data
@@ -41,23 +43,25 @@ services:
       dockerfile: docker/Dockerfile.enhanced
     image: hotwa/mole_antimicrobial_potential:enhanced
     container_name: mole_api_1
+    runtime: nvidia
     restart: unless-stopped
+    ports:
+      - "8001"
     deploy:
       resources:
         reservations:
           devices:
-            - driver: nvidia
-              device_ids: ['1']
-              capabilities: [gpu]
+            - capabilities: [gpu]
     environment:
       - MODE=api
       - HOST=0.0.0.0
       - PORT_API=8000
       - WORKERS_API=1
-      - NVIDIA_VISIBLE_DEVICES=1
+      - GPU_IDS=1
       - MODEL_LOAD_MODE=resident
       - MAX_CONCURRENT_REQUESTS=2
     volumes:
+      - ./start.sh:/workspace/mole_antimicrobial_potential/start.sh:ro
       - ./ckpt:/workspace/mole_antimicrobial_potential/pretrained_model/model_ginconcat_btwin_100k_d8000_l0.0001
       - ./data:/workspace/mole_antimicrobial_potential/data
       - ./raw_data:/workspace/mole_antimicrobial_potential/raw_data
@@ -76,7 +80,7 @@ services:
     container_name: mole_lb
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "8080:8080"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
@@ -91,23 +95,23 @@ services:
       dockerfile: docker/Dockerfile.enhanced
     image: hotwa/mole_antimicrobial_potential:enhanced
     container_name: mole_mcp
+    runtime: nvidia
     restart: unless-stopped
     deploy:
       resources:
         reservations:
           devices:
-            - driver: nvidia
-              device_ids: ['0']
-              capabilities: [gpu]
+            - capabilities: [gpu]
     environment:
       - MODE=mcp_enhanced
       - HOST=0.0.0.0
       - PORT_MCP=8001
       - MCP_TRANSPORT=http
-      - NVIDIA_VISIBLE_DEVICES=0
+      - GPU_IDS=0
       - MODEL_LOAD_MODE=resident
       - MAX_CONCURRENT_REQUESTS=2
     volumes:
+      - ./start.sh:/workspace/mole_antimicrobial_potential/start.sh:ro
       - ./ckpt:/workspace/mole_antimicrobial_potential/pretrained_model/model_ginconcat_btwin_100k_d8000_l0.0001
       - ./data:/workspace/mole_antimicrobial_potential/data
       - ./raw_data:/workspace/mole_antimicrobial_potential/raw_data
