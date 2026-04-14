@@ -1,0 +1,24 @@
+[workspace]
+name = "mole-timber-convert"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+python = "3.10.*"
+pip = "*"
+numpy = "1.24.*"
+pandas = "2.0.*"
+setuptools = "65.0.0.*"
+
+[pypi-dependencies]
+xgboost = "==1.6.2"
+timber-compiler = "*"
+setuptools = "*"
+
+[tasks]
+export-json = "PYTHONPATH=$PWD:$PYTHONPATH python scripts/export_xgb_to_json.py"
+load-timber = "timber load timber_output/mole_xgb.json --name mole-antimicrobial"
+validate-timber = "timber validate mole-antimicrobial"
+serve-timber = "timber serve mole-antimicrobial --host 0.0.0.0 --port 8080"
+full-convert = { depends-on = ["export-json", "load-timber", "validate-timber"] }
+test-consistency = "PYTHONPATH=$PWD:$PYTHONPATH python scripts/test_consistency.py"

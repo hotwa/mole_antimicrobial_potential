@@ -1,0 +1,31 @@
+# Pixi
+.pixi/
+pixi.lock
+
+# Timber output and compiled artifacts
+timber_output/
+dist/
+*.so
+*.a
+*.wasm
+*.dll
+libmodel.a
+libmodel.so
+mole_predictor
+model.timber.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
