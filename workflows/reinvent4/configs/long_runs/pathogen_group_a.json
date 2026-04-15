@@ -1,0 +1,16 @@
+{
+  "experiment_name": "pathogen_group_a_long_rl",
+  "objective": {
+    "mode": "single_strain",
+    "strain_indices": [15, 16, 3, 27],
+    "weights": [0.3, 0.3, 0.2, 0.2]
+  },
+  "chunk_steps": 25,
+  "min_total_steps": 100,
+  "max_total_steps": 400,
+  "success_high": 0.8,
+  "success_top5_mean": 0.6,
+  "success_consecutive_chunks": 3,
+  "monitor_top_n": 20,
+  "commensal_monitor_indices": [1, 10, 11, 26, 28, 33, 34, 35]
+}

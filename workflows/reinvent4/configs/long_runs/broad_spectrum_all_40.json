@@ -1,0 +1,14 @@
+{
+  "experiment_name": "broad_spectrum_all_40_long_rl",
+  "objective": {
+    "mode": "broad_spectrum_soft"
+  },
+  "chunk_steps": 25,
+  "min_total_steps": 150,
+  "max_total_steps": 600,
+  "success_high": 0.6,
+  "success_top5_mean": 0.45,
+  "success_consecutive_chunks": 3,
+  "monitor_top_n": 20,
+  "commensal_monitor_indices": [1, 10, 11, 26, 28, 33, 34, 35]
+}

@@ -6,11 +6,29 @@ platforms = ["linux-64"]
 [dependencies]
 python = "3.10.*"
 pip = "*"
+numpy = "*"
+pandas = "*"
+scipy = "*"
+scikit-learn = "*"
+pyyaml = "*"
+openpyxl = "*"
+tqdm = "*"
+matplotlib = "*"
+seaborn = "*"
+rdkit = "*"
+pytorch = "*"
+xgboost = "*"
+uvicorn = "*"
 
 [pypi-dependencies]
 fastapi = "==0.115.12"
 httpx = "==0.27.2"
+fastmcp = ">=0.3.0"
+pubchempy = "*"
+torch-geometric = "==2.5.0"
 
 [tasks]
-py-compile-score = "python -m py_compile api_server.py src/models.py src/reinvent_scoring.py src/service.py test/test_score_api.py"
+py-compile-score = "python -m py_compile api_server.py src/models.py src/reinvent_scoring.py src/reinvent4_workflow.py src/service.py workflows/reinvent4/scripts/score_bridge.py workflows/reinvent4/scripts/render_config.py workflows/reinvent4/scripts/run_reinvent4.py workflows/reinvent4/scripts/run_long_rl.py workflows/reinvent4/scripts/validate_scaffold.py workflows/reinvent4/scripts/evaluate_results.py test/test_score_api.py test/test_reinvent4_workflow.py"
 test-score = { cmd = "python -m unittest discover -s test -p 'test_score_api.py' -v", depends-on = ["py-compile-score"] }
+test-reinvent4-workflow = { cmd = "python -m unittest discover -s test -p 'test_reinvent4_workflow.py' -v", depends-on = ["py-compile-score"] }
+validate-real-scaffold = "python workflows/reinvent4/scripts/validate_scaffold.py workflows/reinvent4/inputs/scaffolds/mother_scaffold.template.smi"

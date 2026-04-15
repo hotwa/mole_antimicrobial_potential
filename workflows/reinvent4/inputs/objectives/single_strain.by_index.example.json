@@ -1,0 +1,8 @@
+{
+  "label": "single_strain_by_index_demo",
+  "mode": "single_strain",
+  "strain_index": 1,
+  "app_threshold": 0.04374140128493309,
+  "min_nkill": 10,
+  "tau": 0.02
+}

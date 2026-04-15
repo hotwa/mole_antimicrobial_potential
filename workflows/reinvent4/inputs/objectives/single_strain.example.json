@@ -1,0 +1,8 @@
+{
+  "label": "single_akkermansia",
+  "mode": "single_strain",
+  "strain": "Akkermansia muciniphila (NT5021)",
+  "app_threshold": 0.04374140128493309,
+  "min_nkill": 10,
+  "tau": 0.02
+}
