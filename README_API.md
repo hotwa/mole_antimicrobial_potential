@@ -8,6 +8,7 @@
 
 - 健康检查: `GET http://<YOUR_HOST>:8000/health`
 - 预测接口: `POST http://<YOUR_HOST>:8000/predict`
+- REINVENT4 打分接口: `POST http://<YOUR_HOST>:8000/score`
 
 ---
 
@@ -38,6 +39,9 @@
 - `app_threshold`: growth_inhibition 的阈值
 - `min_nkill`: broad_spectrum 判定阈值
 
+`/score` 使用专门的请求体，详细设计与 reward 公式见
+[docs/reinvent4/README.md](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/reinvent4/README.md)。
+
 ---
 
 ## 3. 返回格式
@@ -51,6 +55,7 @@
 
 - `aggregate` 模式: 含 `chem_id`, `apscore_total`, `ginhib_total`, `broad_spectrum` 等
 - `per_strain` 模式: 含 `pred_id`, `antimicrobial_predictive_probability`, `growth_inhibition`
+- `/score` 模式: 返回 REINVENT4 可直接消费的 `score ∈ [0,1]` 及调试细节
 
 ---
 
@@ -74,6 +79,23 @@ resp = httpx.post("http://localhost:8000/predict", json=payload, timeout=120.0)
 print(resp.json())
 ```
 
+### REINVENT4 score
+
+```python
+import httpx
+
+payload = {
+    "smiles": ["CCO", "CCN"],
+    "chem_id": ["mol1", "mol2"],
+    "objective": {
+        "mode": "single_strain",
+        "strain": "Akkermansia muciniphila (NT5021)"
+    }
+}
+resp = httpx.post("http://localhost:8000/score", json=payload, timeout=120.0)
+print(resp.json())
+```
+
 ### 本地脚本
 
 项目内已提供 `test/test_api_request.py`，可直接运行：
@@ -89,3 +111,4 @@ python test/test_api_request.py
 
 - 该接口与 MCP 服务共享同一个 predictor 单例，避免重复加载模型。
 - 旧的 `/mcp` SSE 接口已废弃，建议使用 MCP JSON-RPC 或该 FastAPI 接口。
+- 对 REINVENT4，推荐调用 `/score` 而不是直接拿 `apscore_*` 做 RL reward。

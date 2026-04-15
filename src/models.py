@@ -3,7 +3,7 @@ Shared data models for MCP and FastAPI.
 Avoids import-time side effects.
 """
 
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Literal, Optional, Sequence, Union
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -154,6 +154,145 @@ class MoleculeInput(BaseModel):
             app_threshold=self.app_threshold,
             min_nkill=self.min_nkill,
         )
+
+
+class ScoreObjective(BaseModel):
+    """Reward configuration for REINVENT4 scoring."""
+
+    mode: Literal["single_strain", "broad_spectrum_soft"] = Field(
+        description="Reward mode for REINVENT4."
+    )
+    strain: Optional[str] = Field(
+        default=None,
+        description="Single target strain shortcut for single_strain mode.",
+    )
+    strains: Optional[List[str]] = Field(
+        default=None,
+        description="Explicit target strain list. For broad_spectrum_soft, omit to use all strains.",
+    )
+    weights: Optional[List[float]] = Field(
+        default=None,
+        description="Optional weights aligned with strains for single_strain mode.",
+    )
+    tau: float = Field(
+        default=0.02,
+        gt=0,
+        description="Soft threshold temperature for broad_spectrum_soft reward.",
+    )
+
+    @field_validator("strains")
+    @classmethod
+    def validate_strains(
+        cls, value: Optional[List[str]]
+    ) -> Optional[List[str]]:
+        if value is None:
+            return value
+        if len(value) == 0:
+            raise ValueError("strains list cannot be empty")
+        cleaned = [item.strip() for item in value]
+        if any(not item for item in cleaned):
+            raise ValueError("strains entries must be non-empty strings")
+        if len(set(cleaned)) != len(cleaned):
+            raise ValueError("strains must be unique")
+        return cleaned
+
+    @field_validator("strain")
+    @classmethod
+    def validate_strain(
+        cls, value: Optional[str]
+    ) -> Optional[str]:
+        if value is None:
+            return value
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("strain must be a non-empty string")
+        return cleaned
+
+    @field_validator("weights")
+    @classmethod
+    def validate_weights(
+        cls, value: Optional[List[float]]
+    ) -> Optional[List[float]]:
+        if value is None:
+            return value
+        if len(value) == 0:
+            raise ValueError("weights list cannot be empty")
+        if any(weight < 0 for weight in value):
+            raise ValueError("weights must be non-negative")
+        if sum(value) <= 0:
+            raise ValueError("weights must sum to a positive value")
+        return value
+
+    def resolved_strains(self) -> Optional[List[str]]:
+        """Return the explicit strain panel after applying the strain shortcut."""
+        if self.strain and self.strains:
+            raise ValueError("Provide either strain or strains, not both")
+        if self.strain:
+            return [self.strain]
+        return self.strains
+
+    def validate_configuration(self) -> None:
+        """Validate mode-specific options."""
+        selected = self.resolved_strains()
+        if self.mode == "single_strain" and not selected:
+            raise ValueError("single_strain objective requires strain or strains")
+        if self.mode == "broad_spectrum_soft" and self.weights is not None:
+            raise ValueError("weights are only supported for single_strain mode")
+
+    def normalized_weights(self, panel_size: int) -> List[float]:
+        """Return weights aligned to the selected panel."""
+        if panel_size <= 0:
+            raise ValueError("panel_size must be positive")
+        if self.weights is None:
+            return [1.0 / panel_size] * panel_size
+        if len(self.weights) != panel_size:
+            raise ValueError(
+                f"weights length ({len(self.weights)}) must match selected strains ({panel_size})"
+            )
+        weight_sum = sum(self.weights)
+        return [weight / weight_sum for weight in self.weights]
+
+
+class ReinventScoreRequest(BaseModel):
+    """FastAPI request model for the dedicated REINVENT4 scoring endpoint."""
+
+    molecules: Optional[List[MoleculeInfo]] = Field(
+        default=None,
+        description="List of {smiles, chem_id}. Preferred structured input.",
+    )
+    smiles: Optional[Union[str, List[str]]] = Field(
+        default=None,
+        description="SMILES string or list of SMILES strings.",
+    )
+    chem_id: Optional[Union[str, List[str]]] = Field(
+        default=None,
+        description="Compound id or list of ids aligned with smiles.",
+    )
+    objective: ScoreObjective = Field(
+        description="Reward definition consumed by REINVENT4."
+    )
+    app_threshold: float = Field(
+        default=0.04374140128493309,
+        ge=0,
+        le=1,
+        description="Shared inhibition threshold used to center broad_spectrum_soft rewards.",
+    )
+    min_nkill: int = Field(
+        default=10,
+        ge=0,
+        description="Reported for reference in the score response metadata.",
+    )
+
+    def to_molecule_input(self) -> MoleculeInput:
+        """Convert score requests into the predictor input format."""
+        return MoleculeInput(
+            molecules=self.molecules,
+            smiles=self.smiles,
+            chem_id=self.chem_id,
+            aggregate_scores=False,
+            app_threshold=self.app_threshold,
+            min_nkill=self.min_nkill,
+        ).normalize()
 
 
 class StatusModel(BaseModel):
