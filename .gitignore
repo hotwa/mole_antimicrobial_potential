@@ -62,6 +62,10 @@ workflow/logdir/**
 *.gz
 *.zip
 data/test_output/**
+workflows/reinvent4/results/tests/**
+!workflows/reinvent4/results/tests/README.md
+workflows/reinvent4/results/runs/**
+!workflows/reinvent4/results/runs/.gitkeep
 
 # --- Original Project Specific Rules ---
 mole_cover_letter.docx
