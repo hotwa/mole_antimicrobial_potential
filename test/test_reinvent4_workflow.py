@@ -46,6 +46,22 @@ class Reinvent4WorkflowTestCase(unittest.TestCase):
         self.assertEqual(objective["min_nkill"], 10)
         self.assertEqual(objective["tau"], 0.02)
 
+    def test_load_objective_spec_normalizes_site_reward_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "objective.json"
+            path.write_text(
+                (
+                    '{"mode":"single_strain","strain":"Akkermansia muciniphila (NT5021)",'
+                    '"site_reward":{"enabled":true,"range_min":4,"range_max":27,"lambda":0.85}}'
+                ),
+                encoding="utf-8",
+            )
+            objective = load_objective_spec(path)
+        self.assertTrue(objective["site_reward"]["enabled"])
+        self.assertEqual(objective["site_reward"]["range_min"], 4)
+        self.assertEqual(objective["site_reward"]["range_max"], 27)
+        self.assertAlmostEqual(objective["site_reward"]["lambda"], 0.85)
+
     def test_load_objective_spec_resolves_single_strain_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "objective.json"
@@ -134,11 +150,18 @@ class Reinvent4WorkflowTestCase(unittest.TestCase):
             "app_threshold": 0.04374140128493309,
             "min_nkill": 10,
             "tau": 0.02,
+            "site_reward": {
+                "enabled": True,
+                "range_min": 4,
+                "range_max": 27,
+                "lambda": 0.85,
+            },
             "label": "single_akkermansia",
         }
         payload = build_score_request(["CCO", "CCN"], objective)
         self.assertEqual(payload["chem_id"], ["mol1", "mol2"])
         self.assertEqual(payload["objective"]["strain"], objective["strain"])
+        self.assertTrue(payload["objective"]["site_reward"]["enabled"])
 
     def test_external_process_payload_preserves_input_order(self) -> None:
         response = {
@@ -151,6 +174,7 @@ class Reinvent4WorkflowTestCase(unittest.TestCase):
         payload = external_process_payload(response, ["mol1", "mol2"])
         self.assertEqual(payload["payload"]["predictions"], [0.8, 0.2])
         self.assertEqual(payload["payload"]["chem_ids"], ["mol1", "mol2"])
+        self.assertEqual(payload["payload"]["objective_mode"], ["single_strain", "single_strain"])
 
     def test_extract_top_unique_smiles_prefers_high_scores(self) -> None:
         rows = [
@@ -213,6 +237,7 @@ class Reinvent4WorkflowTestCase(unittest.TestCase):
             rendered = render_template_file(template, context)
         self.assertIn("score_bridge.py", rendered)
         self.assertIn("objective.json", rendered)
+        self.assertIn("--scaffold-file", rendered)
         self.assertIn("Antimicrobial Reward", rendered)
 
     def test_load_runtime_settings_and_build_command(self) -> None:

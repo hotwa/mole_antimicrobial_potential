@@ -6,6 +6,7 @@ import math
 from typing import Any, Dict, List, Mapping, Sequence
 
 from src.models import ReinventScoreRequest, ScoreObjective
+from src.site_reward import compute_site_reward
 
 
 def _sigmoid(value: float) -> float:
@@ -73,6 +74,7 @@ def _score_single_strain(
     return {
         "chem_id": chem_id,
         "score": weighted_probability,
+        "mole_reward": weighted_probability,
         "objective_mode": objective.mode,
         "selected_strains": list(panel),
         "weights": weights,
@@ -99,6 +101,7 @@ def _score_broad_spectrum_soft(
     return {
         "chem_id": chem_id,
         "score": soft_ratio,
+        "mole_reward": soft_ratio,
         "objective_mode": request.objective.mode,
         "selected_strains": list(panel),
         "selected_probabilities": dict(zip(panel, selected_probabilities)),
@@ -113,6 +116,34 @@ def _score_broad_spectrum_soft(
     }
 
 
+def _apply_site_reward(
+    scored: Dict[str, Any],
+    smiles: str,
+    objective: ScoreObjective,
+) -> Dict[str, Any]:
+    config = objective.site_reward
+    if config is None or not config.enabled:
+        return scored
+
+    site_result = compute_site_reward(smiles, config.as_payload())
+    lambda_weight = config.lambda_weight
+    final_score = (lambda_weight * float(scored["score"])) + ((1.0 - lambda_weight) * float(site_result["site_reward"]))
+
+    combined = dict(scored)
+    combined["mole_reward"] = float(scored["score"])
+    combined["site_reward"] = float(site_result["site_reward"])
+    combined["site_coverage"] = float(site_result["site_coverage"])
+    combined["site_balance"] = float(site_result["site_balance"])
+    combined["site_heavy_atoms"] = list(site_result["site_heavy_atoms"])
+    combined["site_rgroups"] = list(site_result["site_rgroups"])
+    combined["site_decomposition_success"] = bool(site_result["site_decomposition_success"])
+    combined["site_decomposition_error"] = site_result["site_decomposition_error"]
+    combined["final_rl_score"] = float(final_score)
+    combined["score"] = float(final_score)
+    combined["site_reward_parameters"] = dict(site_result["site_reward_parameters"])
+    return combined
+
+
 def score_reinvent_predictions(
     raw_items: Sequence[Mapping[str, Any]],
     request: ReinventScoreRequest,
@@ -124,6 +155,10 @@ def score_reinvent_predictions(
     """
 
     grouped = _parse_predictions(raw_items)
+    smiles_by_chem_id = {
+        molecule.chem_id: molecule.smiles
+        for molecule in request.to_molecule_input().molecules or []
+    }
     scored_items: List[Dict[str, Any]] = []
 
     for chem_id, probabilities in grouped.items():
@@ -142,6 +177,10 @@ def score_reinvent_predictions(
                 panel=panel,
                 request=request,
             )
+        smiles = smiles_by_chem_id.get(chem_id)
+        if smiles is None:
+            raise ValueError(f"Missing input SMILES for chem_id={chem_id}")
+        scored = _apply_site_reward(scored, smiles, request.objective)
         scored_items.append(scored)
 
     return scored_items

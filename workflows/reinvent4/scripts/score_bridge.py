@@ -19,6 +19,7 @@ from src.reinvent4_workflow import (  # noqa: E402
     load_objective_spec,
     write_json_file,
 )
+from src.site_reward import scaffold_from_file  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,6 +29,11 @@ def parse_args() -> argparse.Namespace:
         "--objective-file",
         required=True,
         help="Path to the objective JSON file consumed by /score",
+    )
+    parser.add_argument(
+        "--scaffold-file",
+        default="",
+        help="Optional scaffold .smi file used to fill site_reward.scaffold_smiles.",
     )
     parser.add_argument(
         "--audit-file",
@@ -63,6 +69,14 @@ def main() -> int:
         raise SystemExit("No SMILES received on stdin")
 
     objective = load_objective_spec(args.objective_file)
+    site_reward = objective.get("site_reward")
+    if site_reward and site_reward.get("enabled") and not site_reward.get("scaffold_smiles"):
+        if not args.scaffold_file:
+            raise SystemExit("site_reward.enabled=true requires --scaffold-file or site_reward.scaffold_smiles")
+        objective["site_reward"] = {
+            **site_reward,
+            "scaffold_smiles": scaffold_from_file(args.scaffold_file),
+        }
     request_body = build_score_request(smiles, objective)
     response_body = http_json_request(
         args.score_url,

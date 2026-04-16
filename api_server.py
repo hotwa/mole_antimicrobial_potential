@@ -62,6 +62,11 @@ async def score(input_data: ReinventScoreRequest) -> dict:
             "app_threshold": input_data.app_threshold,
             "min_nkill": input_data.min_nkill,
             "tau": input_data.objective.tau,
+            "site_reward": (
+                input_data.objective.site_reward.as_payload()
+                if input_data.objective.site_reward is not None
+                else None
+            ),
         },
         "items": items,
     }

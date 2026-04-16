@@ -5,7 +5,7 @@ Avoids import-time side effects.
 
 from typing import Any, Dict, List, Literal, Optional, Sequence, Union
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 try:
     from rdkit import Chem
@@ -155,6 +155,98 @@ class MoleculeInput(BaseModel):
             min_nkill=self.min_nkill,
         )
 
+class SiteRewardConfig(BaseModel):
+    """Optional structural auxiliary reward for multi-site scaffold decoration."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable experimental multi-site structural reward shaping.",
+    )
+    scaffold_smiles: Optional[str] = Field(
+        default=None,
+        description="Fixed scaffold used for R-group decomposition.",
+    )
+    range_min: int = Field(
+        default=4,
+        ge=0,
+        description="Preferred lower bound for per-site heavy atom counts.",
+    )
+    range_max: int = Field(
+        default=27,
+        ge=0,
+        description="Preferred upper bound for per-site heavy atom counts.",
+    )
+    alpha: float = Field(
+        default=1.5,
+        gt=0,
+        description="Soft lower-bound transition width.",
+    )
+    beta: float = Field(
+        default=2.5,
+        gt=0,
+        description="Soft upper-bound transition width.",
+    )
+    coverage_weight: float = Field(
+        default=0.7,
+        ge=0,
+        description="Weight for the site coverage term inside site_reward.",
+    )
+    balance_weight: float = Field(
+        default=0.3,
+        ge=0,
+        description="Weight for the site balance term inside site_reward.",
+    )
+    lambda_weight: float = Field(
+        default=0.85,
+        ge=0,
+        le=1,
+        alias="lambda",
+        description="MolE reward weight in final_score = lambda * Mole_reward + (1-lambda) * site_reward.",
+    )
+
+    @field_validator("scaffold_smiles")
+    @classmethod
+    def validate_scaffold_smiles(
+        cls, value: Optional[str]
+    ) -> Optional[str]:
+        if value is None:
+            return value
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("scaffold_smiles must be a non-empty string")
+        return cleaned
+
+    def validate_configuration(self) -> None:
+        if not self.enabled:
+            return
+        if self.scaffold_smiles is None:
+            raise ValueError("site_reward.enabled=true requires scaffold_smiles")
+        if self.range_max < self.range_min:
+            raise ValueError("site_reward.range_max must be >= site_reward.range_min")
+        if (self.coverage_weight + self.balance_weight) <= 0:
+            raise ValueError("site_reward coverage_weight + balance_weight must be positive")
+
+    def normalized_component_weights(self) -> tuple[float, float]:
+        total = self.coverage_weight + self.balance_weight
+        if total <= 0:
+            raise ValueError("site_reward component weights must sum to a positive value")
+        return (self.coverage_weight / total, self.balance_weight / total)
+
+    def as_payload(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "scaffold_smiles": self.scaffold_smiles,
+            "range_min": self.range_min,
+            "range_max": self.range_max,
+            "alpha": self.alpha,
+            "beta": self.beta,
+            "coverage_weight": self.coverage_weight,
+            "balance_weight": self.balance_weight,
+            "lambda": self.lambda_weight,
+        }
+
 
 class ScoreObjective(BaseModel):
     """Reward configuration for REINVENT4 scoring."""
@@ -178,6 +270,10 @@ class ScoreObjective(BaseModel):
         default=0.02,
         gt=0,
         description="Soft threshold temperature for broad_spectrum_soft reward.",
+    )
+    site_reward: Optional[SiteRewardConfig] = Field(
+        default=None,
+        description="Optional experimental structural auxiliary reward.",
     )
 
     @field_validator("strains")
@@ -238,6 +334,8 @@ class ScoreObjective(BaseModel):
             raise ValueError("single_strain objective requires strain or strains")
         if self.mode == "broad_spectrum_soft" and self.weights is not None:
             raise ValueError("weights are only supported for single_strain mode")
+        if self.site_reward is not None:
+            self.site_reward.validate_configuration()
 
     def normalized_weights(self, panel_size: int) -> List[float]:
         """Return weights aligned to the selected panel."""

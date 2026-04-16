@@ -165,6 +165,49 @@ class ScoreApiTestCase(unittest.TestCase):
         payload = response.json()
         self.assertIn("Unknown strains requested", payload["detail"])
 
+    def test_site_reward_can_be_enabled_as_structural_auxiliary_term(self) -> None:
+        response = self.client.post(
+            "/score",
+            json={
+                "smiles": "NCCCO",
+                "chem_id": "mol1",
+                "objective": {
+                    "mode": "single_strain",
+                    "strain": "Strain A (NT1)",
+                    "site_reward": {
+                        "enabled": True,
+                        "scaffold_smiles": "[*]CC[*]",
+                        "range_min": 1,
+                        "range_max": 3,
+                        "alpha": 1.0,
+                        "beta": 1.0,
+                        "coverage_weight": 0.7,
+                        "balance_weight": 0.3,
+                        "lambda": 0.8,
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        item = response.json()["items"][0]
+
+        def sigmoid(value: float) -> float:
+            return 1.0 / (1.0 + math.exp(-value))
+
+        site_1 = sigmoid((1 - 1) / 1.0) * sigmoid((3 - 1) / 1.0)
+        site_2 = sigmoid((2 - 1) / 1.0) * sigmoid((3 - 2) / 1.0)
+        coverage = (site_1 + site_2) / 2.0
+        balance = math.exp(-0.5 / (1.5 + 1e-6))
+        site_reward = (0.7 * coverage) + (0.3 * balance)
+        final_score = (0.8 * 0.8) + (0.2 * site_reward)
+
+        self.assertAlmostEqual(item["mole_reward"], 0.8, places=6)
+        self.assertAlmostEqual(item["site_reward"], site_reward, places=6)
+        self.assertAlmostEqual(item["score"], final_score, places=6)
+        self.assertEqual(item["site_heavy_atoms"], [1, 2])
+        self.assertTrue(item["site_decomposition_success"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -33,6 +33,42 @@ DEFAULT_TOP_N = 50
 ATTACHMENT_POINT_PATTERN = re.compile(r"\[\*:([0-9]+)\]")
 
 
+def normalize_site_reward_spec(data: Any, source: str = "<memory>") -> Dict[str, Any] | None:
+    """Normalize the optional experimental site_reward block."""
+    if data is None:
+        return None
+    if not isinstance(data, Mapping):
+        raise ValueError(f"site_reward must be a JSON object: {source}")
+
+    normalized = {
+        "enabled": bool(data.get("enabled", False)),
+        "range_min": parse_int(data.get("range_min"), 4),
+        "range_max": parse_int(data.get("range_max"), 27),
+        "alpha": parse_float(data.get("alpha"), 1.5),
+        "beta": parse_float(data.get("beta"), 2.5),
+        "coverage_weight": parse_float(data.get("coverage_weight"), 0.7),
+        "balance_weight": parse_float(data.get("balance_weight"), 0.3),
+        "lambda": parse_float(data.get("lambda"), 0.85),
+    }
+    scaffold_smiles = data.get("scaffold_smiles")
+    if scaffold_smiles is not None:
+        cleaned = str(scaffold_smiles).strip()
+        if not cleaned:
+            raise ValueError("site_reward.scaffold_smiles must be a non-empty string")
+        normalized["scaffold_smiles"] = cleaned
+    if normalized["range_min"] < 0 or normalized["range_max"] < normalized["range_min"]:
+        raise ValueError("site_reward requires 0 <= range_min <= range_max")
+    if normalized["alpha"] <= 0 or normalized["beta"] <= 0:
+        raise ValueError("site_reward alpha and beta must be positive")
+    if normalized["coverage_weight"] < 0 or normalized["balance_weight"] < 0:
+        raise ValueError("site_reward weights must be non-negative")
+    if (normalized["coverage_weight"] + normalized["balance_weight"]) <= 0:
+        raise ValueError("site_reward coverage_weight + balance_weight must be positive")
+    if not (0 <= normalized["lambda"] <= 1):
+        raise ValueError("site_reward lambda must be within [0, 1]")
+    return normalized
+
+
 def repo_root() -> Path:
     """Return the repository root."""
     return Path(__file__).resolve().parent.parent
@@ -199,6 +235,9 @@ def normalize_objective_spec(data: Mapping[str, Any], source: str = "<memory>") 
         normalized["strains"] = [str(item).strip() for item in strains]
     if weights:
         normalized["weights"] = [float(weight) for weight in weights]
+    site_reward = normalize_site_reward_spec(data.get("site_reward"), source=source)
+    if site_reward is not None:
+        normalized["site_reward"] = site_reward
     normalized["label"] = data.get("label", default_objective_label(normalized))
     return normalized
 
@@ -449,6 +488,8 @@ def build_reinvent_context(
                     settings["score_url"],
                     "--objective-file",
                     str(resolve_path(objective_path)),
+                    "--scaffold-file",
+                    str(resolve_path(scaffold_path)),
                     "--audit-file",
                     str(run_path / "bridge_audit.jsonl"),
                     "--request-timeout",
@@ -472,6 +513,8 @@ def build_score_request(smiles: Sequence[str], objective: Mapping[str, Any]) -> 
         objective_body["strains"] = objective["strains"]
     if "weights" in objective:
         objective_body["weights"] = objective["weights"]
+    if "site_reward" in objective:
+        objective_body["site_reward"] = dict(objective["site_reward"])
     return {
         "smiles": list(smiles),
         "chem_id": chem_ids,
@@ -506,13 +549,16 @@ def external_process_payload(
 ) -> Dict[str, Any]:
     """Convert a /score response into REINVENT4 ExternalProcess JSON."""
     ordered_items = order_score_items(score_response.get("items", []), chem_ids)
+    objective_mode = score_response.get("objective", {}).get("mode")
     return {
         "version": 1,
         "payload": {
             "predictions": [float(item["score"]) for item in ordered_items],
             "chem_ids": list(chem_ids),
             "score_details": ordered_items,
-            "objective_mode": score_response.get("objective", {}).get("mode"),
+            # ExternalProcess metadata must be per-SMILES lists. Scalar strings
+            # silently truncate the associated results object in REINVENT4.
+            "objective_mode": [objective_mode] * len(ordered_items),
         },
     }
 
