@@ -165,6 +165,23 @@ class ScoreApiTestCase(unittest.TestCase):
         payload = response.json()
         self.assertIn("Unknown strains requested", payload["detail"])
 
+    def test_duplicate_chem_ids_are_rejected(self) -> None:
+        response = self.client.post(
+            "/score",
+            json={
+                "smiles": ["CCO", "CCN"],
+                "chem_id": ["dup", "dup"],
+                "objective": {
+                    "mode": "single_strain",
+                    "strain": "Strain A (NT1)",
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 422, response.text)
+        payload = response.json()
+        self.assertIn("chem_id values must be unique", payload["detail"])
+
     def test_site_reward_can_be_enabled_as_structural_auxiliary_term(self) -> None:
         response = self.client.post(
             "/score",

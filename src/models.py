@@ -122,6 +122,7 @@ class MoleculeInput(BaseModel):
             for index, molecule in enumerate(self.molecules, start=1):
                 chem_id = molecule.chem_id or f"mol{index}"
                 normalized.append(MoleculeInfo(smiles=molecule.smiles, chem_id=chem_id))
+            _ensure_unique_chem_ids(normalized)
             return MoleculeInput(
                 molecules=normalized,
                 aggregate_scores=self.aggregate_scores,
@@ -148,12 +149,19 @@ class MoleculeInput(BaseModel):
             MoleculeInfo(smiles=smiles, chem_id=chem_id)
             for smiles, chem_id in zip(smiles_list, chem_id_list)
         ]
+        _ensure_unique_chem_ids(molecules)
         return MoleculeInput(
             molecules=molecules,
             aggregate_scores=self.aggregate_scores,
             app_threshold=self.app_threshold,
             min_nkill=self.min_nkill,
         )
+
+
+def _ensure_unique_chem_ids(molecules: Sequence[MoleculeInfo]) -> None:
+    chem_ids = [molecule.chem_id or "" for molecule in molecules]
+    if len(set(chem_ids)) != len(chem_ids):
+        raise ValueError("chem_id values must be unique")
 
 class SiteRewardConfig(BaseModel):
     """Optional structural auxiliary reward for multi-site scaffold decoration."""

@@ -3,9 +3,12 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+import os
+from unittest import mock
 
 import numpy as np
 
+import src.classifier_backend as classifier_backend
 from src.classifier_backend import (
     DEFAULT_PICKLE_MODEL_PATH,
     DEFAULT_TIMBER_MODEL_DIR,
@@ -40,6 +43,31 @@ class TestClassifierBackend(unittest.TestCase):
                 timber_model_dir=tmpdir,
             )
             self.assertEqual(backend.name, "pickle")
+
+    def test_auto_falls_back_to_pickle_when_timber_initialization_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            timber_dir = Path(tmpdir)
+            (timber_dir / "compiled").mkdir(parents=True)
+            timber_lib = timber_dir / "compiled" / "libtimber_model.so"
+            timber_lib.write_bytes(b"stub")
+            with mock.patch.object(
+                classifier_backend,
+                "TimberCompiledArtifactBackend",
+                side_effect=OSError("boom"),
+            ):
+                backend = resolve_classifier_backend(
+                    pickle_path=DEFAULT_PICKLE_MODEL_PATH,
+                    timber_model_dir=timber_dir,
+                )
+            self.assertEqual(backend.name, "pickle")
+
+    def test_default_pickle_path_is_repo_root_relative(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        expected = repo_root / "data" / "03.model_evaluation" / "MolE-XGBoost-08.03.2024_14.20.pkl"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with mock.patch.object(os, "getcwd", return_value=tmpdir):
+                probe = inspect_classifier_backends(timber_model_dir=tmpdir)
+        self.assertEqual(probe.pickle_path, expected)
 
     def test_timber_and_pickle_backends_match_on_random_features(self):
         if not DEFAULT_TIMBER_MODEL_DIR.is_dir():

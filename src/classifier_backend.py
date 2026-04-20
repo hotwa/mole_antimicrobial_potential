@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import logging
 import os
 import pickle
 from dataclasses import dataclass
@@ -20,10 +21,10 @@ from typing import Optional, Protocol
 import numpy as np
 
 
-DEFAULT_PICKLE_MODEL_PATH = Path(
-    "data/03.model_evaluation/MolE-XGBoost-08.03.2024_14.20.pkl"
-)
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_PICKLE_MODEL_PATH = REPO_ROOT / "data" / "03.model_evaluation" / "MolE-XGBoost-08.03.2024_14.20.pkl"
 DEFAULT_TIMBER_MODEL_DIR = Path.home() / ".timber" / "models" / "mole-antimicrobial"
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -287,7 +288,18 @@ def resolve_classifier_backend(
                     "No usable classifier backend found: Timber artifact missing and pickle model missing."
                 )
             return PickleXGBoostBackend(probe.pickle_path)
-        return TimberCompiledArtifactBackend(probe.timber_model_dir)
+        try:
+            return TimberCompiledArtifactBackend(probe.timber_model_dir)
+        except Exception as exc:
+            if probe.preference == "timber":
+                raise
+            if not probe.pickle_available:
+                raise
+            LOGGER.warning(
+                "Timber backend failed to load (%s); falling back to pickle backend.",
+                exc,
+            )
+            return PickleXGBoostBackend(probe.pickle_path)
 
     if not probe.pickle_available:
         if probe.preference == "pickle":
@@ -295,8 +307,26 @@ def resolve_classifier_backend(
                 f"Pickle backend requested but file not found: {probe.pickle_path}"
             )
         if probe.timber_available:
-            return TimberCompiledArtifactBackend(probe.timber_model_dir)
+            try:
+                return TimberCompiledArtifactBackend(probe.timber_model_dir)
+            except Exception as exc:
+                if probe.preference == "timber":
+                    raise
+                raise RuntimeError(
+                    "Timber backend appears available but failed to load and no pickle backend exists"
+                ) from exc
         raise FileNotFoundError(
             "No usable classifier backend found: pickle model missing and Timber artifact missing."
         )
-    return PickleXGBoostBackend(probe.pickle_path)
+    try:
+        return PickleXGBoostBackend(probe.pickle_path)
+    except Exception as exc:
+        if probe.timber_available:
+            if probe.preference == "timber":
+                raise
+            LOGGER.warning(
+                "Pickle backend failed to load (%s); falling back to Timber backend.",
+                exc,
+            )
+            return TimberCompiledArtifactBackend(probe.timber_model_dir)
+        raise
