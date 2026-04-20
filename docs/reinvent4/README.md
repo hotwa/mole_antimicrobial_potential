@@ -2,6 +2,9 @@
 
 本目录说明当前仓库新增的 `POST /score` 接口。这个接口不是替代原有的 `POST /predict`，而是专门为 REINVENT4 强化学习设计的“连续 reward 层”。
 
+实际运行 REINVENT4 LibInvent 工作流的脚本、模板和示例输入位于
+[workflows/reinvent4/README.md](/home/lingyuzeng/project/mole_antimicrobial_potential/workflows/reinvent4/README.md)。
+
 ## 1. 为什么单独做 `/score`
 
 真正影响 REINVENT4 强化学习成败的，不是 `log` 的底，而是 reward 是否满足下面三个条件：

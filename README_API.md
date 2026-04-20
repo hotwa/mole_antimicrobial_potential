@@ -41,6 +41,8 @@
 
 `/score` 使用专门的请求体，详细设计与 reward 公式见
 [docs/reinvent4/README.md](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/reinvent4/README.md)。
+REINVENT4 LibInvent 的运行脚本和模板见
+[workflows/reinvent4/README.md](/home/lingyuzeng/project/mole_antimicrobial_potential/workflows/reinvent4/README.md)。
 
 ---
 

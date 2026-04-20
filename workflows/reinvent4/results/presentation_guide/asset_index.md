@@ -36,6 +36,20 @@
 - `0.8` 阈值对哪些任务合理，对哪些任务不合理
 - `stage1.chkpt`、`prior_file`、`agent_file` 的关系
 
+### 0.3 四个位点同时优化可行性
+
+- `four_site_cooptimization.md`
+- `site_reward_design.md`
+- `../runs/pathogen_group_a_chunk001/real_chunk001_cpu_fix/chunk_001/rgroup_site_summary.json`
+- `../runs/pathogen_group_a_chunk002/real_chunk002_cpu_fix/chunk_001/rgroup_site_summary.json`
+
+适合说明：
+
+- 当前纯 MolE reward 为什么主要得到“单个位点主导扩展”
+- 为什么四个位点同时优化在技术上可行、但当前配置下不会自然出现
+- 后续为什么需要多位点结构引导而不是继续假设它会自动发生
+- 如果后续引入弱结构先验，第一版 `site_reward` 应该如何定义与落地
+
 ### 1. 真实母核 scaffold
 
 - `../../inputs/scaffolds/mother_scaffold.template.smi`

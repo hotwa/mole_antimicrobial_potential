@@ -18,6 +18,10 @@
   如何讲“固定母核做广谱抗菌优化”的完整逻辑
 - `reward_alignment.md`
   如何把原始 MolE 抗菌分数与 REINVENT4 的 RL reward 对齐，适合做公式页
+- `site_reward_design.md`
+  如果后续需要从“单个位点主导扩展”推进到“四个位点共同参与”，这里给出第一版弱结构辅助分数设计
+- `four_site_cooptimization.md`
+  如何解释“四个位点是否能同时优化”、当前为什么没有自然发生，以及后续如何推进
 - `single_strain_plan.md`
   如何讲“固定母核做单菌活性优化”的完整逻辑
 - `strain_selection.md`
@@ -78,6 +82,7 @@
 
 - `broad_spectrum_plan.md`
 - `reward_alignment.md`
+- `four_site_cooptimization.md`
 - `single_strain_plan.md`
 - `strain_selection.md`
 - `long_run_rl_strategy.md`

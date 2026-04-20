@@ -23,6 +23,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _format_strain_feature_name(strain_name: str) -> str:
+    """Match the legacy one-hot column names stored in the pickled XGBoost model."""
+    return str((strain_name,))
+
+
 class AntimicrobialPredictor:
     """Predict antimicrobial activity with lazy async loading."""
 
@@ -113,11 +118,15 @@ class AntimicrobialPredictor:
             return pickle.load(file)
 
     def _prep_ohe(self, categories):
-        ohe = OneHotEncoder(sparse=False)
+        try:
+            ohe = OneHotEncoder(sparse_output=False)
+        except TypeError:
+            ohe = OneHotEncoder(sparse=False)
         ohe.fit(pd.DataFrame(categories))
+        feature_columns = [_format_strain_feature_name(category) for category in categories]
         return pd.DataFrame(
             ohe.transform(pd.DataFrame(categories)),
-            columns=categories,
+            columns=feature_columns,
             index=categories,
         )
 
@@ -151,6 +160,7 @@ class AntimicrobialPredictor:
 
         xpred = xpred.set_index("pred_id")
         xpred = xpred.drop(columns=["chem_id", "strain_name"])
+        xpred.columns = [str(column) for column in xpred.columns]
         return xpred
 
     def _gram_stain(self, label_df: pd.DataFrame) -> pd.DataFrame:
