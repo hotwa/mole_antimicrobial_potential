@@ -13,11 +13,16 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, validator
 from scipy.stats.mstats import gmean
 from sklearn.preprocessing import OneHotEncoder
-from mole_representation import process_representation
+from mole_representation import process_representation, load_pretrained_model
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _format_strain_feature_name(strain_name: str) -> str:
+    """Match the legacy one-hot column names stored in the pickled XGBoost model."""
+    return str((strain_name,))
 
 # RDKit用于SMILES验证
 try:
@@ -113,17 +118,23 @@ class AntimicrobialPredictor:
         self.mole_model_path = "pretrained_model/model_ginconcat_btwin_100k_d8000_l0.0001"
         self.strain_categories = "data/01.prepare_training_data/maier_screening_results.tsv.gz"
         self.gram_information = "raw_data/maier_microbiome/strain_info_SF2.xlsx"
-        
+
+        # Configuration
+        self.model_load_mode = os.environ.get("MODEL_LOAD_MODE", "resident")
+        self.max_concurrent_requests = int(os.environ.get("MAX_CONCURRENT_REQUESTS", "2"))
+        self.gpu_semaphore = asyncio.Semaphore(self.max_concurrent_requests)
+
         # Async loading state
         self._model_loaded = False
         self._load_task = None
         self._loading_lock = asyncio.Lock()
-        
+
         # Initialize without blocking
         self.model = None
+        self.mole_net = None
         self.maier_screen = None
         self.strain_ohe = None
-        
+
         # Start background loading
         asyncio.create_task(self._async_init())
     
@@ -138,7 +149,15 @@ class AntimicrobialPredictor:
                 # Load XGBoost model
                 loop = asyncio.get_event_loop()
                 self.model = await loop.run_in_executor(None, self._load_xgb_model)
-                
+
+                # Load MolE GINet model if in resident mode
+                if self.model_load_mode == "resident":
+                    logger.info("Loading MolE GINet model into memory (Resident Mode)...")
+                    self.mole_net = await loop.run_in_executor(
+                        None,
+                        lambda: load_pretrained_model(self.mole_model_path, self.device)
+                    )
+
                 # Load strain data
                 self.maier_screen = await loop.run_in_executor(
                     None, 
@@ -150,12 +169,74 @@ class AntimicrobialPredictor:
                     self.maier_screen.columns
                 )
                 
+                # Calibrate concurrency if in resident mode
+                if self.model_load_mode == "resident" and self.device.startswith("cuda"):
+                    await self._calibrate_concurrency()
+
                 self._model_loaded = True
-                logger.info("Model loading completed successfully")
+                logger.info("Model loading and calibration completed successfully")
             except Exception as e:
+                import traceback
                 logger.error(f"Failed to load models: {e}")
+                logger.error(traceback.format_exc())
                 raise
-    
+
+    async def _calibrate_concurrency(self):
+        """Calibrate maximum safe concurrency based on VRAM usage"""
+        try:
+            logger.info("Starting VRAM calibration...")
+
+            # 1. Measure baseline (weights only)
+            torch.cuda.empty_cache()
+            mem_base = torch.cuda.memory_reserved(0)
+            logger.info(f"Baseline VRAM usage: {mem_base / 1024**3:.2f} GB")
+
+            # 2. Run a dummy prediction to measure per-request usage
+            # Create a dummy input (Benzene)
+            dummy_input = MoleculeInput(smiles=["c1ccccc1"])
+
+            # Run representation generation (the heavy part)
+            mem_before = torch.cuda.memory_reserved(0)
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                self._get_mole_representation,
+                dummy_input
+            )
+            mem_peak = torch.cuda.memory_reserved(0)
+
+            # Calculate per-request cost (with safety margin)
+            mem_per_req = max(mem_peak - mem_before, 100 * 1024 * 1024) # Minimum 100MB estimate
+            logger.info(f"Per-request VRAM usage: {mem_per_req / 1024**2:.2f} MB")
+
+            # 3. Calculate capacity
+            total_mem = torch.cuda.get_device_properties(0).total_memory
+            safe_limit = total_mem * 0.90 # Use 90% of VRAM
+            available_mem = safe_limit - mem_base
+
+            if available_mem <= 0:
+                logger.warning("VRAM nearly full! Setting concurrency to 1.")
+                max_concurrency = 1
+            else:
+                max_concurrency = int(available_mem // mem_per_req)
+                # Cap at reasonable limit to avoid CPU/IO bottlenecks
+                max_concurrency = min(max_concurrency, 100)
+                # Ensure at least 1
+                max_concurrency = max(max_concurrency, 1)
+
+            logger.info(f"Total VRAM: {total_mem / 1024**3:.2f} GB")
+            logger.info(f"Safe Limit (90%): {safe_limit / 1024**3:.2f} GB")
+            logger.info(f"Available for concurrent reqs: {available_mem / 1024**3:.2f} GB")
+            logger.info(f"Calculated Max Concurrency: {max_concurrency}")
+
+            # 4. Update semaphore
+            self.max_concurrent_requests = max_concurrency
+            self.gpu_semaphore = asyncio.Semaphore(self.max_concurrent_requests)
+
+        except Exception as e:
+            logger.error(f"Calibration failed: {e}. Keeping default concurrency: {self.max_concurrent_requests}")
+            import traceback
+            logger.error(traceback.format_exc())
+
     async def ensure_loaded(self):
         """Ensure models are loaded before prediction"""
         if not self._model_loaded:
@@ -174,11 +255,15 @@ class AntimicrobialPredictor:
     
     def _prep_ohe(self, categories):
         """Prepare one-hot encoding for strain variables"""
-        ohe = OneHotEncoder(sparse=False)
+        try:
+            ohe = OneHotEncoder(sparse_output=False)
+        except TypeError:
+            ohe = OneHotEncoder(sparse=False)
         ohe.fit(pd.DataFrame(categories))
+        feature_columns = [_format_strain_feature_name(category) for category in categories]
         return pd.DataFrame(
             ohe.transform(pd.DataFrame(categories)), 
-            columns=categories, 
+            columns=feature_columns, 
             index=categories
         )
     
@@ -206,7 +291,8 @@ class AntimicrobialPredictor:
             smile_column_str="smiles",
             id_column_str="chem_id",
             pretrained_dir=self.mole_model_path,
-            device=self.device
+            device=self.device,
+            model=self.mole_net
         )
 
     
@@ -225,6 +311,7 @@ class AntimicrobialPredictor:
 
         xpred = xpred.set_index("pred_id")
         xpred = xpred.drop(columns=["chem_id", "strain_name"])
+        xpred.columns = [str(column) for column in xpred.columns]
         
         return xpred
     
@@ -312,36 +399,38 @@ class AntimicrobialPredictor:
         # Validate input
         if not input_data.smiles and not input_data.molecules:
             raise HTTPException(status_code=400, detail="Either smiles or molecules must be provided")
-        
-        # Get MolE representation (with timeout)
-        try:
-            mole_representation = await asyncio.wait_for(
-                asyncio.get_event_loop().run_in_executor(
-                    None, 
-                    self._get_mole_representation, 
-                    input_data
-                ), 
-                timeout=60  # 60秒超时
-            )
-        except asyncio.TimeoutError:
-            raise HTTPException(status_code=408, detail="MolE representation generation timeout")
-        
-        # Prepare strain-level predictions
-        X_input = self._add_strains(mole_representation)
-        
-        # Make predictions (with timeout)
-        try:
-            y_pred = await asyncio.wait_for(
-                asyncio.get_event_loop().run_in_executor(
-                    None,
-                    self.model.predict_proba,
-                    X_input
-                ),
-                timeout=30  # 30秒超时
-            )
-        except asyncio.TimeoutError:
-            raise HTTPException(status_code=408, detail="Prediction timeout")
-        
+
+        # Acquire GPU semaphore
+        async with self.gpu_semaphore:
+            # Get MolE representation (with timeout)
+            try:
+                mole_representation = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        None,
+                        self._get_mole_representation,
+                        input_data
+                    ),
+                    timeout=60  # 60秒超时
+                )
+            except asyncio.TimeoutError:
+                raise HTTPException(status_code=408, detail="MolE representation generation timeout")
+
+            # Prepare strain-level predictions
+            X_input = self._add_strains(mole_representation)
+
+            # Make predictions (with timeout)
+            try:
+                y_pred = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        None,
+                        self.model.predict_proba,
+                        X_input
+                    ),
+                    timeout=30  # 30秒超时
+                )
+            except asyncio.TimeoutError:
+                raise HTTPException(status_code=408, detail="Prediction timeout")
+
         pred_df = pd.DataFrame(y_pred, columns=["0", "1"], index=X_input.index)
         
         # Binarize predictions using threshold
@@ -380,6 +469,12 @@ predictor = AntimicrobialPredictor()
 
 # Add health check endpoints
 add_health_check(app, predictor)
+
+@app.on_event("startup")
+async def startup_event():
+    """Ensure models are loaded and calibrated on startup"""
+    logger.info("Application startup: Pre-loading models...")
+    await predictor.ensure_loaded()
 
 @app.post("/mcp")
 async def mcp_endpoint(request: Request):

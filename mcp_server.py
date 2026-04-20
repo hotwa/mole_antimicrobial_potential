@@ -35,9 +35,9 @@ async def predict(
         预测结果列表
     """
     # 延迟导入，避免启动时实例化
-    from predict_api import MoleculeInput
+    from src.models import MoleculeInput
     from src.service import get_predictor
-    
+
     predictor = get_predictor()
     input_data = MoleculeInput(
         molecules=molecules,
@@ -46,7 +46,8 @@ async def predict(
         aggregate_scores=aggregate_scores,
         app_threshold=app_threshold,
         min_nkill=min_nkill,
-    )
+    ).normalize()
+    await predictor.ensure_loaded()
     return await predictor.predict(input_data)
 
 def main():

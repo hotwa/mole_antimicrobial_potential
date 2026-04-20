@@ -24,17 +24,25 @@ This project provides an AI-powered system for predicting the antimicrobial acti
 2. **XGBoost Classifier** (`data/03.model_evaluation/`)
    - Trained on Maier et al. (2018) dataset
    - Predicts antimicrobial activity across 100+ strains
-   - Models: `MolE-XGBoost-08.03.2024_14.20.pkl`
+   - Model: `MolE-XGBoost-08.03.2024_14.20.pkl`
 
-3. **Prediction Pipeline** (`mole_antimicrobial_prediction.py`)
-   - Command-line interface for batch predictions
-   - Supports SMILES input or pre-computed representations
-   - Outputs detailed or aggregated results
+3. **Prediction Core** (`src/predictor.py`, `src/models.py`)
+   - Lazy, concurrency-safe loading
+   - Structured input normalization (Pydantic v2)
+   - Returns pure items (no protocol metadata)
 
-4. **MCP/API Server** (`mcp_server.py`, `predict_api.py`)
-   - FastMCP server for LLM agent integration
-   - FastAPI REST endpoint with SSE streaming
-   - JSON schema for tool discovery
+4. **Predictor Singleton** (`src/service.py`)
+   - Single instance shared by FastAPI + FastMCP
+   - Avoids duplicated model/data load
+
+5. **FastMCP Server** (`mcp_server_enhanced.py`)
+   - MCP JSON-RPC 2.0 over streamable HTTP
+   - Tools: `status`, `predict_antimicrobial_potential`
+   - Resources: `resource://schema`, `resource://about`, `resource://strains`
+
+6. **FastAPI Server** (`api_server.py`)
+   - REST endpoints `/health` and `/predict`
+   - Uses the same predictor singleton
 
 ### Data Flow
 
@@ -52,93 +60,127 @@ SMILES → MolE Model → XGBoost → Predictions → Aggregation
 
 ### MCP Server (Recommended for Agents)
 
-**Endpoint**: `POST http://<host>:8000/mcp`
+**Endpoint**: `POST http://<host>:8001/mcp`
 
-**Request Format**:
+**Protocol**: JSON-RPC 2.0 (FastMCP streamable HTTP). Initialize once and include the `mcp-session-id` header in follow-up calls.
+
+**Initialize**:
 ```json
 {
-  "id": "request-id",
-  "method": "predict",
+  "jsonrpc": "2.0",
+  "id": "init",
+  "method": "initialize",
   "params": {
-    "smiles": "CCO" | ["CCO", "CCN"],
-    "chem_id": "ethanol" | ["ethanol", "ethylamine"],
-    "molecules": [{"smiles": "CCO", "chem_id": "ethanol"}],
-    "aggregate_scores": true,
-    "app_threshold": 0.04374,
-    "min_nkill": 10
+    "protocolVersion": "2024-11-05",
+    "capabilities": {},
+    "clientInfo": {"name": "client", "version": "0.1.0"}
   }
 }
 ```
 
-**Response Format** (SSE Stream):
-```
-event: start
-data: {"id": "request-id"}
-
-event: data
-data: {"id": "request-id", "result": [...]}
-
-event: end
-data: {"id": "request-id"}
+**Then notify initialized**:
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "notifications/initialized",
+  "params": {}
+}
 ```
 
-### REST API (Legacy)
+**Tool call format**:
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "request-id",
+  "method": "tools/call",
+  "params": {
+    "name": "predict_antimicrobial_potential",
+    "arguments": {
+      "smiles": "CCO",
+      "aggregate_scores": true
+    }
+  }
+}
+```
 
-**Endpoint**: `POST http://<host>:8000/mcp` (same as MCP)
+**Response**: JSON-RPC result; tool outputs are in `result.structuredContent`.
 
-**Alternative**: Direct function calls via `predict_api.py`
+### FastAPI (MODE=api)
+
+- `GET http://<host>:8000/health`
+- `POST http://<host>:8000/predict`
+
+Request body is the `MoleculeInput` schema (see `README_API.md`).
 
 ## Usage Examples
 
-### For LLM Agents
+### For LLM Agents (MCP JSON-RPC)
 
-#### 1. Single Molecule - Detailed Prediction
+#### 1) Single Molecule - Detailed Prediction
 ```json
 {
-  "method": "predict",
+  "jsonrpc": "2.0",
+  "id": "1",
+  "method": "tools/call",
   "params": {
-    "smiles": "CCO",
-    "aggregate_scores": false
-  }
-}
-```
-**Returns**: 100+ predictions per strain with probabilities
-
-#### 2. Single Molecule - Aggregated Summary
-```json
-{
-  "method": "predict",
-  "params": {
-    "smiles": "CCO",
-    "aggregate_scores": true
-  }
-}
-```
-**Returns**: Antimicrobial scores, inhibition counts, broad-spectrum flag
-
-#### 3. Batch Processing with Custom IDs
-```json
-{
-  "method": "predict",
-  "params": {
-    "molecules": [
-      {"smiles": "CCO", "chem_id": "ethanol"},
-      {"smiles": "CCN", "chem_id": "ethylamine"}
-    ],
-    "aggregate_scores": true
+    "name": "predict_antimicrobial_potential",
+    "arguments": {
+      "smiles": "CCO",
+      "aggregate_scores": false
+    }
   }
 }
 ```
 
-#### 4. Custom Thresholds
+#### 2) Single Molecule - Aggregated Summary
 ```json
 {
-  "method": "predict",
+  "jsonrpc": "2.0",
+  "id": "2",
+  "method": "tools/call",
   "params": {
-    "smiles": "CCO",
-    "aggregate_scores": true,
-    "app_threshold": 0.1,
-    "min_nkill": 5
+    "name": "predict_antimicrobial_potential",
+    "arguments": {
+      "smiles": "CCO",
+      "aggregate_scores": true
+    }
+  }
+}
+```
+
+#### 3) Batch Processing with Custom IDs
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "3",
+  "method": "tools/call",
+  "params": {
+    "name": "predict_antimicrobial_potential",
+    "arguments": {
+      "molecules": [
+        {"smiles": "CCO", "chem_id": "ethanol"},
+        {"smiles": "CCN", "chem_id": "ethylamine"}
+      ],
+      "aggregate_scores": true
+    }
+  }
+}
+```
+
+#### 4) Custom Thresholds
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "4",
+  "method": "tools/call",
+  "params": {
+    "name": "predict_antimicrobial_potential",
+    "arguments": {
+      "smiles": "CCO",
+      "aggregate_scores": true,
+      "app_threshold": 0.1,
+      "min_nkill": 5
+    }
   }
 }
 ```
@@ -205,54 +247,13 @@ python mole_antimicrobial_prediction.py input.tsv output.tsv --smiles_input --ag
    - Consider both Gram-positive and Gram-negative activity
 
 3. **Error Handling**
-   - Check for "event: error" in SSE stream
-   - Validate model files exist before deployment
-   - Handle GPU/CPU fallback gracefully
+   - MCP errors are returned via JSON-RPC `error`
+   - Check response `error` before reading `result`
 
 4. **Performance Optimization**
    - Batch multiple molecules in single requests
    - Use aggregated results for high-throughput screening
    - Cache molecular representations if repeating queries
-
-### Common Patterns
-
-#### Drug Discovery Workflow
-```json
-{
-  "method": "predict",
-  "params": {
-    "molecules": [{"smiles": "...", "chem_id": "candidate_1"}],
-    "aggregate_scores": true,
-    "min_nkill": 10
-  }
-}
-```
-→ Filter for broad-spectrum candidates
-
-#### Lead Optimization
-```json
-{
-  "method": "predict",
-  "params": {
-    "smiles": ["SMILES_A", "SMILES_B", "SMILES_C"],
-    "aggregate_scores": false
-  }
-}
-```
-→ Compare strain-specific activity profiles
-
-#### High-Throughput Screening
-```json
-{
-  "method": "predict",
-  "params": {
-    "molecules": [...],  // 1000+ compounds
-    "aggregate_scores": true,
-    "app_threshold": 0.05
-  }
-}
-```
-→ Identify top candidates by broad-spectrum score
 
 ## Deployment
 
@@ -265,18 +266,18 @@ docker compose up -d
 ### Environment Configuration
 ```yaml
 environment:
-  - MODE=mcp              # mcp or api
+  - MODE=mcp_enhanced      # api or mcp_enhanced
   - HOST=0.0.0.0
-  - PORT=8000
-  - TRANSPORT=http        # http, sse, or stdio
-  - WORKERS=1
+  - PORT_API=8000          # FastAPI
+  - PORT_MCP=8001          # FastMCP
+  - MCP_TRANSPORT=http
 ```
 
 ### Manual Setup
 ```bash
 conda env create -f environment.yaml
 conda activate mole
-python mcp_server.py --host 0.0.0.0 --port 8000 --transport http
+python mcp_server_enhanced.py
 ```
 
 ## Troubleshooting
@@ -291,15 +292,9 @@ python mcp_server.py --host 0.0.0.0 --port 8000 --transport http
 - Process molecules in smaller batches
 - Use aggregated results to reduce memory
 
-### Invalid SMILES
-- Validate SMILES format before submission
-- Use RDKit or similar library for validation
-- Check for special characters or encoding issues
-
-### Performance Slow
-- Batch molecules together
-- Use aggregated results when possible
-- Ensure GPU is available for MolE model
+### MCP Session Errors
+- Ensure you call `initialize` and then `notifications/initialized`
+- Include `mcp-session-id` in subsequent requests
 
 ## References
 

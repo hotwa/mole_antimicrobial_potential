@@ -1,0 +1,12 @@
+{
+  "label": "multi_bacteroides_weighted",
+  "mode": "single_strain",
+  "strains": [
+    "Akkermansia muciniphila (NT5021)",
+    "Bacteroides thetaiotaomicron (NT5004)"
+  ],
+  "weights": [0.6, 0.4],
+  "app_threshold": 0.04374140128493309,
+  "min_nkill": 10,
+  "tau": 0.02
+}

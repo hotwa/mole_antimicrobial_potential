@@ -1,0 +1,9 @@
+# Real mother scaffold normalized for LibInvent input.
+# Original user labels were [*:4] [*:3] [*:13] [*:12].
+# REINVENT4 expects attachment labels to be contiguous from 0.
+# Current normalized order keeps the same left-to-right scaffold positions:
+# [*:4] -> [*:0]
+# [*:3] -> [*:1]
+# [*:13] -> [*:2]
+# [*:12] -> [*:3]
+CC1=C\[C@H]([*:0])[C@@H]([*:1])OC(=O)C[C@@H](O)[C@H](C)[C@@H]([*:2])[C@@H]([*:3])C[C@@H](C)C(=O)\C=C\1

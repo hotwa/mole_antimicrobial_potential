@@ -1,0 +1,16 @@
+{
+  "mode": "single_strain",
+  "strain_indices": [15, 16, 3, 27],
+  "weights": [0.3, 0.3, 0.2, 0.2],
+  "label": "pathogen_group_a_site_reward_lambda98",
+  "site_reward": {
+    "enabled": true,
+    "range_min": 4,
+    "range_max": 27,
+    "alpha": 1.5,
+    "beta": 2.5,
+    "coverage_weight": 0.7,
+    "balance_weight": 0.3,
+    "lambda": 0.98
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "label": "multi_strain_by_indices_demo",
+  "mode": "single_strain",
+  "strain_indices": [1, 6, 16],
+  "weights": [0.5, 0.2, 0.3],
+  "app_threshold": 0.04374140128493309,
+  "min_nkill": 10,
+  "tau": 0.02
+}

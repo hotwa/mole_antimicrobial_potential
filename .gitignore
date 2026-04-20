@@ -1,24 +1,85 @@
-pretrained_model/model_ginconcat_btwin_100k_d8000_l0.0001/model.pth
-**/__pycache__/**
-**/.DStore/**
-**/.Rhistory
+# --- Python & Runtime ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --- Environments ---
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.pixi/
+
+# --- IDEs & Tools ---
+.idea/
+.vscode/
+*.swp
+*.swo
 .DS_Store
+
+# --- Models & Weights (Large Files) ---
+*.pth
+*.pt
+*.ckpt
+*.bin
+*.onnx
+*.safetensors
+
+# Do NOT ignore the directories themselves, just the large files inside
+# ckpt/  <-- REMOVED to allow directory tracking
+ckpt/**
+!ckpt/.gitkeep
+!ckpt/config.yaml
+!ckpt/model.pth
+!ckpt/README.md
+
+# --- Logs & Temp ---
+*.log
+workflow/logdir/**
+
+# --- Data & Outputs ---
+*.tar.gz
+*.gz
+*.zip
+data/test_output/**
+workflows/reinvent4/results/tests/**
+!workflows/reinvent4/results/tests/README.md
+workflows/reinvent4/results/runs/**
+!workflows/reinvent4/results/runs/.gitkeep
+
+# --- Original Project Specific Rules ---
 mole_cover_letter.docx
 
 examples/input/hcs_molecules.tsv
 examples/output/hcs_molecules_mole.tsv.gz
 
-workflow/logdir/**
-
-
 data/03.model_evaluation/**
-
 !data/03.model_evaluation/complete_test_predictions.tsv.gz
 !data/03.model_evaluation/chemDesc-XGBoost-08.03.2024_14.20.pkl
 !data/03.model_evaluation/ecfp4-XGBoost-08.03.2024_14.20.pkl
 !data/03.model_evaluation/MolE-XGBoost-08.03.2024_14.20.pkl
 !data/03.model_evaluation/optimal_thresholds.tsv.gz
-
 
 data/05.analyze_mce_predictions/**
 !data/05.analyze_mce_predictions/ecfp4_mce_overview.pdf
@@ -45,10 +106,11 @@ data/08.compare_mce_maier/ecfp4_distance_to_maier.tsv.gz
 data/Supplementary\ Source\ Data/**
 data/Source\ Data/**
 
-data/test_output/**
 raw_data/maier_microbiome/commontree_wPath.txt
 raw_data/maier_microbiome/commontree.txt
 raw_data/maier_microbiome/phyliptree.phy
 
 workflow/prep_source_data.ipynb
-ckpt
+
+# Explicitly exclude the heavy pretrained model folder contents except config
+pretrained_model/model_ginconcat_btwin_100k_d8000_l0.0001/model.pth

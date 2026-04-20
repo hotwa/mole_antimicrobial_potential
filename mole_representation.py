@@ -58,8 +58,16 @@ def parse_arguments():
 
     # Determine device for MolE model
     if args.device == "auto":
-        args.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    
+        if torch.cuda.is_available():
+            cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+            if cuda_visible:
+                gpu_id = cuda_visible.split(",")[0].strip()
+                args.device = f"cuda:{gpu_id}"
+            else:
+                args.device = "cuda:0"
+        else:
+            args.device = "cpu"
+
     print(f"Using {args.device}")
 
     return args
@@ -130,7 +138,7 @@ def load_pretrained_model(pretrained_model_dir, device="cuda:0"):
     return model
 
 
-def process_representation(dataset_path, smile_column_str, id_column_str, pretrained_dir, device):
+def process_representation(dataset_path, smile_column_str, id_column_str, pretrained_dir, device, model=None):
 
     """
     Process the dataset to generate molecular representations.
@@ -141,6 +149,7 @@ def process_representation(dataset_path, smile_column_str, id_column_str, pretra
     - smile_column_str (str, optional): Name of the column containing SMILES strings.
     - id_column_str (str, optional): Name of the column containing molecule IDs.
     - device (str): Device to use for computation (default is "cuda:0"). Can also be "cpu".
+    - model (GINet, optional): Pre-loaded model instance. If None, model will be loaded from pretrained_dir.
 
     Returns:
     - udl_representation (pandas.DataFrame): DataFrame containing molecular representations if split_data=False.
@@ -149,8 +158,11 @@ def process_representation(dataset_path, smile_column_str, id_column_str, pretra
     # First we read the SMILES dataframe
     smiles_df = read_smiles(dataset_path, smile_col=smile_column_str, id_col=id_column_str)
 
-    # Load the pre-trained model
-    pmodel = load_pretrained_model(pretrained_model_dir=pretrained_dir, device=device)
+    # Load the pre-trained model if not provided
+    if model is None:
+        pmodel = load_pretrained_model(pretrained_model_dir=pretrained_dir, device=device)
+    else:
+        pmodel = model
 
     # Gather pre-trained representation
     udl_representation = batch_representation(smiles_df, pmodel, smile_column_str, id_column_str, device=device)

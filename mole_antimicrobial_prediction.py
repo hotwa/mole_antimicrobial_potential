@@ -124,6 +124,11 @@ def read_representation(args):
 
 
 # Prepare the OHE of the strains
+def _format_strain_feature_name(strain_name):
+    """Match the legacy one-hot column names stored in the pickled XGBoost model."""
+    return str((strain_name,))
+
+
 def prep_ohe(categories):
 
     """
@@ -140,13 +145,21 @@ def prep_ohe(categories):
     """
 
     # Prepare OHE
-    ohe = OneHotEncoder(sparse=False)
+    try:
+        ohe = OneHotEncoder(sparse_output=False)
+    except TypeError:
+        ohe = OneHotEncoder(sparse=False)
 
     # Fit OHE
     ohe.fit(pd.DataFrame(categories))
 
     # Prepare OHE
-    cat_ohe = pd.DataFrame(ohe.transform(pd.DataFrame(categories)), columns=categories, index=categories)
+    feature_columns = [_format_strain_feature_name(category) for category in categories]
+    cat_ohe = pd.DataFrame(
+        ohe.transform(pd.DataFrame(categories)),
+        columns=feature_columns,
+        index=categories,
+    )
 
     return cat_ohe
 
@@ -184,6 +197,7 @@ def add_strains(chemfeats_df, screen_path):
 
     xpred = xpred.set_index("pred_id")
     xpred = xpred.drop(columns=["chem_id", "strain_name"])
+    xpred.columns = [str(column) for column in xpred.columns]
 
     # Make sure correct number of rows
     assert xpred.shape[0] == (chemfeats_df.shape[0] * ohe_df.shape[0])

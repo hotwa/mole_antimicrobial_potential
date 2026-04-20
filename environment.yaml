@@ -27,3 +27,4 @@ dependencies:
     - fastapi
     - uvicorn
     - fastmcp>=0.3.0
+    - httpx
