@@ -401,3 +401,6 @@ class StatusModel(BaseModel):
     device: Optional[str] = None
     version: str = "1.0.0"
     model_path: str = "data/03.model_evaluation/MolE-XGBoost-08.03.2024_14.20.pkl"
+    classifier_backend: Optional[str] = None
+    classifier_backend_path: Optional[str] = None
+    classifier_backend_preference: Optional[str] = None

@@ -19,6 +19,10 @@ async def health() -> dict:
         "version": status.version,
         "loaded": status.loaded,
         "device": status.device,
+        "model_path": status.model_path,
+        "classifier_backend": status.classifier_backend,
+        "classifier_backend_path": status.classifier_backend_path,
+        "classifier_backend_preference": status.classifier_backend_preference,
     }
 
 

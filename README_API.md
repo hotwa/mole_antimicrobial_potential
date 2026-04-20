@@ -114,3 +114,7 @@ python test/test_api_request.py
 - 该接口与 MCP 服务共享同一个 predictor 单例，避免重复加载模型。
 - 旧的 `/mcp` SSE 接口已废弃，建议使用 MCP JSON-RPC 或该 FastAPI 接口。
 - 对 REINVENT4，推荐调用 `/score` 而不是直接拿 `apscore_*` 做 RL reward。
+- 如果 `site_reward.enabled=true`，则 `/score` 请求里的 `objective.site_reward`
+  必须提供 `scaffold_smiles`。仓库中的 `mole` CLI 和 REINVENT4 bridge 会在
+  只提供 `--scaffold-file` 时自动补齐该字段，默认使用
+  `workflows/reinvent4/inputs/scaffolds/mother_scaffold.template.smi`。

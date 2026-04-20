@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import pickle
 import re
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -17,10 +17,13 @@ from scipy.stats.mstats import gmean
 from sklearn.preprocessing import OneHotEncoder
 
 from mole_representation import process_representation
+from src.classifier_backend import inspect_classifier_backends, resolve_classifier_backend
 from src.models import MoleculeInfo, MoleculeInput, StatusModel
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _format_strain_feature_name(strain_name: str) -> str:
@@ -43,17 +46,21 @@ class AntimicrobialPredictor:
                 self.device = "cuda:0"
         else:
             self.device = "cpu"
-        self.xgboost_model_path = (
-            "data/03.model_evaluation/MolE-XGBoost-08.03.2024_14.20.pkl"
-        )
-        self.mole_model_path = "pretrained_model/model_ginconcat_btwin_100k_d8000_l0.0001"
-        self.strain_categories = "data/01.prepare_training_data/maier_screening_results.tsv.gz"
-        self.gram_information = "raw_data/maier_microbiome/strain_info_SF2.xlsx"
+        self.classifier_backend_probe = inspect_classifier_backends()
+        self.classifier_backend_preference = self.classifier_backend_probe.preference
+        self.xgboost_model_path = str(self.classifier_backend_probe.pickle_path)
+        self.timber_model_dir = str(self.classifier_backend_probe.timber_model_dir)
+        default_mole_model = REPO_ROOT / "pretrained_model" / "model_ginconcat_btwin_100k_d8000_l0.0001"
+        self.mole_model_path = os.environ.get("MOLE_MOLE_MODEL_PATH", str(default_mole_model))
+        self.strain_categories = str(REPO_ROOT / "data" / "01.prepare_training_data" / "maier_screening_results.tsv.gz")
+        self.strain_index_path = str(REPO_ROOT / "workflows" / "reinvent4" / "inputs" / "strain_index.tsv")
+        self.gram_information = str(REPO_ROOT / "raw_data" / "maier_microbiome" / "strain_info_SF2.xlsx")
 
         self._model_loaded = False
         self._load_task: Optional[asyncio.Task[None]] = None
         self._loading_lock = asyncio.Lock()
 
+        self.classifier_backend = None
         self.model = None
         self.maier_screen = None
         self.strain_ohe = None
@@ -81,21 +88,35 @@ class AntimicrobialPredictor:
         return StatusModel(
             loaded=self._model_loaded,
             device=self.device,
-            model_path=self.xgboost_model_path,
+            model_path=self.model.status().path if self._model_loaded and self.model else self.xgboost_model_path,
+            classifier_backend=self.model.status().backend if self._model_loaded and self.model else None,
+            classifier_backend_path=self.model.status().path if self._model_loaded and self.model else None,
+            classifier_backend_preference=self.classifier_backend_preference,
         )
 
     async def _async_load(self) -> None:
         loop = asyncio.get_running_loop()
 
         start = time.monotonic()
-        self.model = await loop.run_in_executor(None, self._load_xgb_model)
-        logger.info("Loaded xgboost model in %.2fs", time.monotonic() - start)
+        self.classifier_backend = await loop.run_in_executor(
+            None,
+            resolve_classifier_backend,
+            self.classifier_backend_preference,
+            self.classifier_backend_probe.pickle_path,
+            self.classifier_backend_probe.timber_model_dir,
+        )
+        self.model = self.classifier_backend
+        logger.info(
+            "Loaded classifier backend (%s) in %.2fs",
+            self.classifier_backend.status().backend,
+            time.monotonic() - start,
+        )
 
         start = time.monotonic()
-        self.maier_screen = await loop.run_in_executor(
-            None,
-            lambda: pd.read_csv(self.strain_categories, sep="\t", index_col=0),
+        self.maier_screen, selected_strain_source = await loop.run_in_executor(
+            None, self._load_strain_panel
         )
+        self.strain_categories = selected_strain_source
         logger.info("Loaded maier_screen data in %.2fs", time.monotonic() - start)
 
         start = time.monotonic()
@@ -110,13 +131,6 @@ class AntimicrobialPredictor:
 
         self._model_loaded = True
 
-    def _load_xgb_model(self):
-        logger.info("Loading XGBoost model from %s", self.xgboost_model_path)
-        if not os.path.exists(self.xgboost_model_path):
-            raise FileNotFoundError(f"Model file not found: {self.xgboost_model_path}")
-        with open(self.xgboost_model_path, "rb") as file:
-            return pickle.load(file)
-
     def _prep_ohe(self, categories):
         try:
             ohe = OneHotEncoder(sparse_output=False)
@@ -128,6 +142,26 @@ class AntimicrobialPredictor:
             ohe.transform(pd.DataFrame(categories)),
             columns=feature_columns,
             index=categories,
+        )
+
+    def _load_strain_panel(self):
+        primary_path = os.path.expanduser(self.strain_categories)
+        if os.path.isfile(primary_path):
+            return pd.read_csv(primary_path, sep="\t", index_col=0), primary_path
+
+        fallback_path = os.path.expanduser(self.strain_index_path)
+        if os.path.isfile(fallback_path):
+            strain_index = pd.read_csv(fallback_path, sep="\t")
+            if "strain_name" not in strain_index.columns:
+                raise ValueError(
+                    f"Fallback strain index file missing 'strain_name' column: {fallback_path}"
+                )
+            columns = [str(strain) for strain in strain_index["strain_name"].tolist()]
+            return pd.DataFrame(columns=columns), fallback_path
+
+        raise FileNotFoundError(
+            "No strain panel file found. Expected either "
+            f"{primary_path} or fallback {fallback_path}"
         )
 
     def _load_gram_dict(self) -> Dict[str, str]:

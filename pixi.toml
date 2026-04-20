@@ -28,7 +28,10 @@ pubchempy = "*"
 torch-geometric = "==2.5.0"
 
 [tasks]
-py-compile-score = "python -m py_compile api_server.py src/models.py src/reinvent_scoring.py src/reinvent4_workflow.py src/service.py workflows/reinvent4/scripts/score_bridge.py workflows/reinvent4/scripts/render_config.py workflows/reinvent4/scripts/run_reinvent4.py workflows/reinvent4/scripts/run_long_rl.py workflows/reinvent4/scripts/validate_scaffold.py workflows/reinvent4/scripts/evaluate_results.py workflows/reinvent4/scripts/analyze_rgroup_sites.py test/test_score_api.py test/test_reinvent4_workflow.py"
+py-compile-score = "python -m py_compile api_server.py mole_cli.py src/classifier_backend.py src/models.py src/reinvent_scoring.py src/reinvent4_workflow.py src/service.py src/predictor.py workflows/reinvent4/scripts/score_bridge.py workflows/reinvent4/scripts/render_config.py workflows/reinvent4/scripts/run_reinvent4.py workflows/reinvent4/scripts/run_long_rl.py workflows/reinvent4/scripts/validate_scaffold.py workflows/reinvent4/scripts/evaluate_results.py workflows/reinvent4/scripts/analyze_rgroup_sites.py test/test_classifier_backend.py test/test_cli.py test/test_score_api.py test/test_reinvent4_workflow.py"
+mole = "python mole_cli.py"
 test-score = { cmd = "python -m unittest discover -s test -p 'test_score_api.py' -v", depends-on = ["py-compile-score"] }
+test-cli = { cmd = "python -m unittest discover -s test -p 'test_cli.py' -v", depends-on = ["py-compile-score"] }
+test-classifier-backend = { cmd = "python -m unittest discover -s test -p 'test_classifier_backend.py' -v", depends-on = ["py-compile-score"] }
 test-reinvent4-workflow = { cmd = "python -m unittest discover -s test -p 'test_reinvent4_workflow.py' -v", depends-on = ["py-compile-score"] }
 validate-real-scaffold = "python workflows/reinvent4/scripts/validate_scaffold.py workflows/reinvent4/inputs/scaffolds/mother_scaffold.template.smi"

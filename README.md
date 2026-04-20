@@ -67,6 +67,49 @@ curl localhost:8000/health
 curl localhost:8001/health
 ```
 
+## Pixi CLI
+
+The repository now also ships a unified `mole` CLI for local workflows and agents.
+It uses the same predictor singleton as the HTTP servers and can run with `pixi`
+on a fresh machine.
+
+```bash
+# Install the local environment
+pixi install
+
+# Check the environment, CUDA, model paths, Timber backend, and REINVENT4 assets
+pixi run mole doctor
+
+# Generate MolE embeddings from raw SMILES
+pixi run mole embed --smiles CCO
+
+# Predict strain-level antimicrobial probabilities
+pixi run mole predict --smiles CCO
+
+# Compute REINVENT4 rewards
+pixi run mole score \
+  --objective-file workflows/reinvent4/inputs/objectives/pathogen_group_a.site_reward.prototype.json \
+  --smiles CCO
+
+# Run the chunked REINVENT4 optimizer wrapper
+pixi run mole optimize \
+  --template workflows/reinvent4/configs/templates/multi_strain_rl_macrocycle.toml.tpl \
+  --env-file workflows/reinvent4/configs/local.env.recommended.example \
+  --experiment-spec workflows/reinvent4/configs/long_runs/pathogen_group_a.json \
+  --scaffold-file workflows/reinvent4/inputs/scaffolds/mother_scaffold.template.smi
+```
+
+Notes:
+
+- `mole score` automatically fills `site_reward.scaffold_smiles` from
+  `--scaffold-file` when the objective enables `site_reward` but does not embed
+  a scaffold.
+- The default classifier backend is `auto`; Timber is used when the compiled
+  artifact is available, otherwise the original pickle backend is used.
+- You can override the MolE checkpoint path with `MOLE_MOLE_MODEL_PATH`.
+- You can force the classifier backend with `MOLE_CLASSIFIER_BACKEND=timber`
+  or `MOLE_CLASSIFIER_BACKEND=pickle`.
+
 ## API Endpoints
 
 - **Health Check**: `GET /health`
