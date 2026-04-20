@@ -72,6 +72,8 @@
   [REINVENT4-main](/home/lingyuzeng/project/REINVENT4-main)
 - prior 建议目录：
   [reinvent4_assets/priors](/home/lingyuzeng/project/reinvent4_assets/priors)
+- MolE 预训练 checkpoint 来源说明：
+  [ckpt/README.md](/home/lingyuzeng/project/mole_antimicrobial_potential/ckpt/README.md)
 - 当前真实母核 scaffold：
   [mother_scaffold.template.smi](/home/lingyuzeng/project/mole_antimicrobial_potential/workflows/reinvent4/inputs/scaffolds/mother_scaffold.template.smi)
 

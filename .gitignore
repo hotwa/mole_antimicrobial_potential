@@ -52,6 +52,7 @@ ckpt/**
 !ckpt/.gitkeep
 !ckpt/config.yaml
 !ckpt/model.pth
+!ckpt/README.md
 
 # --- Logs & Temp ---
 *.log
