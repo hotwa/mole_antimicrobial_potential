@@ -4,6 +4,49 @@ This repository now keeps only a few canonical entrypoints at the root. Most
 implementation logic lives under `src/`, and older compatibility scripts live
 under `scripts/legacy/`.
 
+## Project Overview
+
+This project is a MolE-based antimicrobial discovery system. It takes SMILES
+strings as input, converts them into MolE embeddings, and then uses XGBoost or
+Timber-backed classifiers to estimate antimicrobial activity across many
+bacterial strains. The same core predictor powers the CLI, the FastAPI server,
+the MCP server, and the REINVENT4 scoring workflow.
+
+The main capabilities are:
+
+- MolE embedding generation for small molecules
+- Per-strain antimicrobial probability prediction
+- Aggregated antimicrobial scoring, including broad-spectrum summaries
+- REINVENT4 reward generation for single-strain, multi-strain, and
+  broad-spectrum optimization
+- Chunked long-run RL workflows with scaffold-aware optimization
+
+If you are a new agent, this is the page to read first when you need to
+understand how the repository is organized and which file owns which feature.
+
+## Usage Summary
+
+The shortest path for common tasks is:
+
+- Environment and model sanity check:
+  - `pixi run mole doctor`
+- MolE embedding:
+  - `pixi run mole embed --smiles CCO`
+- Antimicrobial prediction:
+  - `pixi run mole predict --smiles CCO`
+- REINVENT4 reward computation:
+  - `pixi run mole score --objective-file workflows/reinvent4/inputs/objectives/pathogen_group_a.site_reward.prototype.json --smiles CCO`
+- REINVENT4 optimization:
+  - `pixi run mole optimize --template workflows/reinvent4/configs/templates/multi_strain_rl_macrocycle.toml.tpl --env-file workflows/reinvent4/configs/local.env.recommended.example --experiment-spec workflows/reinvent4/configs/long_runs/pathogen_group_a.json --scaffold-file workflows/reinvent4/inputs/scaffolds/mother_scaffold.template.smi`
+- FastAPI service:
+  - `python api_server.py`
+- MCP service:
+  - `python mcp_server_enhanced.py`
+
+Use the canonical CLI/API/MCP entrypoints above for new work. Use the legacy
+wrappers only when reproducing old behavior or comparing against historical
+scripts.
+
 ## Canonical Entrypoints
 
 Use these first for new work:
