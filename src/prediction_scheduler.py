@@ -74,27 +74,24 @@ class PredictionScheduler:
         max_batch_size: int = DEFAULT_MAX_BATCH_SIZE,
         min_batch_size: int = DEFAULT_MIN_BATCH_SIZE,
         target_memory_fraction: float = DEFAULT_TARGET_MEMORY_FRACTION,
-        bytes_per_item: int = DEFAULT_BYTES_PER_ITEM,
     ) -> None:
         self._predictor = predictor
         self.max_batch_size = max_batch_size
         self.min_batch_size = min_batch_size
         self.target_memory_fraction = target_memory_fraction
-        self._bytes_per_item = bytes_per_item
 
         # Whether ensure_loaded() has already been awaited once
         self._model_ensured: bool = False
 
         if initial_batch_size is not None:
-            self.current_batch_size = max(min_batch_size, min(initial_batch_size, max_batch_size))
+            self.current_batch_size: Optional[int] = max(min_batch_size, min(initial_batch_size, max_batch_size))
+            logger.info(
+                "PredictionScheduler initialised with fixed batch_size=%d",
+                self.current_batch_size,
+            )
         else:
-            self.current_batch_size = self._auto_batch_size()
-
-        logger.info(
-            "PredictionScheduler initialised: device=%s, batch_size=%d",
-            self._device_name(),
-            self.current_batch_size,
-        )
+            self.current_batch_size = None
+            logger.info("PredictionScheduler initialised with dynamic auto-batching (will tune on first run)")
 
     # ------------------------------------------------------------------
     # Public API
@@ -121,6 +118,14 @@ class PredictionScheduler:
         if not self._model_ensured:
             await self._predictor.ensure_loaded()
             self._model_ensured = True
+
+        if self.current_batch_size is None:
+            self.current_batch_size = await self._auto_tune_batch_size(app_threshold, min_nkill)
+            logger.info(
+                "Auto-tuned batch size to %d for device %s",
+                self.current_batch_size,
+                self._device_name(),
+            )
 
         all_results: List[Dict[str, Any]] = []
         batch_size = self.current_batch_size
@@ -202,23 +207,55 @@ class PredictionScheduler:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _auto_batch_size(self) -> int:
-        if torch.cuda.is_available():
-            try:
-                free_bytes, _total = torch.cuda.mem_get_info()
-            except Exception:
-                free_bytes = 0
-        else:
+    async def _auto_tune_batch_size(self, app_threshold: float, min_nkill: int) -> int:
+        """Run a warmup pass to estimate per-item memory and return a tuned batch size."""
+        if not torch.cuda.is_available():
+            return min(64, self.max_batch_size)
+
+        from src.models import MoleculeInput, MoleculeInfo
+
+        # Measure memory before
+        torch.cuda.reset_peak_memory_stats()
+        mem_before = torch.cuda.memory_allocated()
+
+        # Warmup with 2 dummy items
+        warmup_size = 2
+        dummies = [
+            MoleculeInfo(smiles="CCO", chem_id="warmup1"),
+            MoleculeInfo(smiles="CCN", chem_id="warmup2"),
+        ]
+        request = MoleculeInput(
+            molecules=dummies,
+            aggregate_scores=True,
+            app_threshold=app_threshold,
+            min_nkill=min_nkill,
+        )
+
+        try:
+            await self._predictor.predict(request)
+        except Exception as exc:
+            logger.warning("Warmup prediction failed, falling back to static default: %s", exc)
+            return min(64, self.max_batch_size)
+
+        mem_after_peak = torch.cuda.max_memory_allocated()
+        cost_for_batch = mem_after_peak - mem_before
+        
+        # Add conservative buffer and ensure it's at least DEFAULT_BYTES_PER_ITEM
+        bytes_per_item = max(int(cost_for_batch / warmup_size), DEFAULT_BYTES_PER_ITEM)
+
+        try:
+            free_bytes, _total = torch.cuda.mem_get_info()
+        except Exception:
             free_bytes = 0
 
         if free_bytes > 0:
             return self._compute_batch_size(
                 free_bytes=free_bytes,
-                bytes_per_item=self._bytes_per_item,
+                bytes_per_item=bytes_per_item,
                 target_fraction=self.target_memory_fraction,
                 max_batch_size=self.max_batch_size,
             )
-        # CPU or no memory info: use a conservative default
+        
         return min(64, self.max_batch_size)
 
     def _device_name(self) -> str:

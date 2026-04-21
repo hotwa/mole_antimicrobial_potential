@@ -28,6 +28,11 @@ understand how the repository is organized and which file owns which feature.
 
 The shortest path for common tasks is:
 
+- Bootstrap a CUDA-capable runtime on a new NVIDIA machine:
+  - `pixi install`
+  - `pixi run install-cuda-torch`
+  - optionally override the CUDA wheel with `MOLE_TORCH_CUDA_TAG=cu124`
+    and `MOLE_TORCH_VERSION=2.5.1+cu124`
 - Environment and model sanity check:
   - `pixi run mole doctor`
 - MolE embedding:
@@ -136,6 +141,8 @@ automated test suite.
 ## Quick Rules
 
 - Use `pixi run mole doctor` before running anything on a new machine.
+- If CUDA is missing after `pixi install`, run `pixi run install-cuda-torch`
+  before the first `mole embed` or `mole predict` call.
 - Use `pixi run mole predict` and `pixi run mole score` for day-to-day work.
 - Use `pixi run mole screen` for reusable batch screening of broad-spectrum candidates.
 - Use `python api_server.py` only when you specifically need the HTTP server.

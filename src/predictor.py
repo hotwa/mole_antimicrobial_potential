@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import time
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -16,7 +17,7 @@ import torch
 from scipy.stats.mstats import gmean
 from sklearn.preprocessing import OneHotEncoder
 
-from src.mole_representation import process_representation
+from src.mole_representation import load_pretrained_model, process_representation
 from src.classifier_backend import inspect_classifier_backends, resolve_classifier_backend
 from src.models import MoleculeInfo, MoleculeInput, StatusModel
 
@@ -65,6 +66,8 @@ class AntimicrobialPredictor:
         self.maier_screen = None
         self.strain_ohe = None
         self._gram_dict: Optional[Dict[str, str]] = None
+        self.mole_model = None
+        self._mole_model_lock = threading.Lock()
 
     async def ensure_loaded(self) -> None:
         """Load models and metadata once under concurrency."""
@@ -129,6 +132,10 @@ class AntimicrobialPredictor:
         self._gram_dict = await loop.run_in_executor(None, self._load_gram_dict)
         logger.info("Loaded gram excel data in %.2fs", time.monotonic() - start)
 
+        start = time.monotonic()
+        await loop.run_in_executor(None, self._load_mole_model)
+        logger.info("Loaded MolE representation model in %.2fs", time.monotonic() - start)
+
         self._model_loaded = True
 
     def _prep_ohe(self, categories):
@@ -172,6 +179,20 @@ class AntimicrobialPredictor:
         )
         return maier_strains[["Gram stain"]].to_dict()["Gram stain"]
 
+    def _load_mole_model(self):
+        if self.mole_model is not None:
+            return self.mole_model
+
+        with self._mole_model_lock:
+            if self.mole_model is not None:
+                return self.mole_model
+
+            self.mole_model = load_pretrained_model(
+                pretrained_model_dir=self.mole_model_path,
+                device=self.device,
+            )
+            return self.mole_model
+
     def _get_mole_representation(self, molecules: List[MoleculeInfo]):
         smiles = [mol.smiles for mol in molecules]
         chem_ids = [mol.chem_id or f"mol{index + 1}" for index, mol in enumerate(molecules)]
@@ -182,6 +203,7 @@ class AntimicrobialPredictor:
             id_column_str="chem_id",
             pretrained_dir=self.mole_model_path,
             device=self.device,
+            model=self._load_mole_model(),
         )
 
     def _add_strains(self, chemfeats_df: pd.DataFrame) -> pd.DataFrame:
@@ -209,8 +231,9 @@ class AntimicrobialPredictor:
         return df_label
 
     def _antimicrobial_potential(self, score_df: pd.DataFrame) -> pd.DataFrame:
-        score_df["chem_id"] = score_df["pred_id"].str.split(":", expand=True)[0]
-        score_df["strain_name"] = score_df["pred_id"].str.split(":", expand=True)[1]
+        split = score_df["pred_id"].astype(str).str.rsplit(":", n=1, expand=True)
+        score_df["chem_id"] = split[0]
+        score_df["strain_name"] = split[1]
 
         pred_df = self._gram_stain(score_df)
 

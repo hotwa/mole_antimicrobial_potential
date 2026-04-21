@@ -33,7 +33,7 @@ def _parse_predictions(
             raise ValueError("Each prediction item must contain pred_id='chem_id:strain'")
         if probability is None:
             raise ValueError("Each prediction item must contain antimicrobial_predictive_probability")
-        chem_id, strain_name = pred_id.split(":", 1)
+        chem_id, strain_name = pred_id.rsplit(":", 1)
         grouped.setdefault(chem_id, {})[strain_name] = float(probability)
     return grouped
 

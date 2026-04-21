@@ -100,7 +100,7 @@ def _load_archive_input(
 
             if chem_id_col not in frame.columns:
                 member_stem = _basename_without_suffixes(Path(member.name))
-                frame[chem_id_col] = [f"{member_stem}::{i + 1}" for i in range(len(frame))]
+                frame[chem_id_col] = [f"{member_stem}__{i + 1}" for i in range(len(frame))]
 
             frame = frame.rename(columns={smiles_col: "smiles", chem_id_col: "chem_id"})
             frame["source_file"] = member.name
@@ -158,7 +158,7 @@ def _load_sqlite_input(
         raise ValueError(f"Missing SMILES column '{smiles_colname}' in {path}")
 
     if chem_id_colname not in frame.columns:
-        frame[chem_id_colname] = [f"{source_group}::{i + 1}" for i in range(len(frame))]
+        frame[chem_id_colname] = [f"{source_group}__{i + 1}" for i in range(len(frame))]
 
     frame = frame.rename(columns={smiles_colname: "smiles", chem_id_colname: "chem_id"})
     frame["source_file"] = str(path)
@@ -270,7 +270,7 @@ async def screen_frame(
         if aggregate_scores:
             chunk_result = chunk_result.merge(chunk, on="chem_id", how="left")
         else:
-            split = chunk_result["pred_id"].astype(str).str.split(":", n=1, expand=True)
+            split = chunk_result["pred_id"].astype(str).str.rsplit(":", n=1, expand=True)
             chunk_result["chem_id"] = split[0]
             chunk_result["strain_name"] = split[1]
             chunk_result = chunk_result.merge(chunk, on="chem_id", how="left")

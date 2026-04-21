@@ -77,6 +77,12 @@ on a fresh machine.
 # Install the local environment
 pixi install
 
+# Install a CUDA-enabled PyTorch wheel into the active Pixi env
+pixi run install-cuda-torch
+
+# Override the CUDA wheel when moving to a different NVIDIA/CUDA stack
+MOLE_TORCH_CUDA_TAG=cu124 MOLE_TORCH_VERSION=2.5.1+cu124 pixi run install-cuda-torch
+
 # Check the environment, CUDA, model paths, Timber backend, and REINVENT4 assets
 pixi run mole doctor
 
@@ -114,6 +120,9 @@ Notes:
   first, and also writes per-source grouped results under `by_source/`.
 - The default classifier backend is `auto`; Timber is used when the compiled
   artifact is available, otherwise the original pickle backend is used.
+- `pixi run install-cuda-torch` installs a CUDA-enabled PyTorch wheel into the
+  active Pixi environment. Use `MOLE_TORCH_CUDA_TAG` and `MOLE_TORCH_VERSION`
+  to switch CUDA wheels when moving to another NVIDIA GPU machine.
 - You can override the MolE checkpoint path with `MOLE_MOLE_MODEL_PATH`.
 - You can force the classifier backend with `MOLE_CLASSIFIER_BACKEND=timber`
   or `MOLE_CLASSIFIER_BACKEND=pickle`.

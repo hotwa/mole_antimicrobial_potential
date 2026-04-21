@@ -43,6 +43,9 @@
 [docs/reinvent4/README.md](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/reinvent4/README.md)。
 REINVENT4 LibInvent 的运行脚本和模板见
 [workflows/reinvent4/README.md](/home/lingyuzeng/project/mole_antimicrobial_potential/workflows/reinvent4/README.md)。
+如果你在新的 NVIDIA 机器上部署，请先执行 `pixi install`
+并运行 `pixi run install-cuda-torch`，必要时可通过
+`MOLE_TORCH_CUDA_TAG` 和 `MOLE_TORCH_VERSION` 切换到对应 CUDA wheel。
 
 如果你需要查找“功能 -> Python 文件 -> 推荐用法”的映射，请看：
 

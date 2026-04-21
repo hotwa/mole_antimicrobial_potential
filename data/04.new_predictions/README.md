@@ -35,7 +35,7 @@ If `chem_id` is missing, the tool auto-generates stable IDs such as:
 
 - `mol1`
 - `mol2`
-- `tylosin_scheme_b_unique_products::1`
+- `tylosin_scheme_b_unique_products__1`
 
 All other columns are preserved in the output where possible.
 

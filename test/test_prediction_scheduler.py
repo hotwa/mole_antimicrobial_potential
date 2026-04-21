@@ -24,18 +24,7 @@ def _run(coro):
 class TestBatchSizeSelection(unittest.TestCase):
     """select_batch_size must return larger batches on bigger GPUs."""
 
-    def _make_scheduler(self, free_bytes: int, total_bytes: int):
-        from src.prediction_scheduler import PredictionScheduler
-
-        sched = PredictionScheduler.__new__(PredictionScheduler)
-        sched._warmup_bytes_per_item = 500_000          # 500 KB / item (mocked)
-        sched._batch_size: int | None = None            # not yet cached
-        sched.max_batch_size = 2048
-        sched.target_memory_fraction = 0.80
-        sched._free_bytes = free_bytes
-        sched._total_bytes = total_bytes
-        return sched
-
+    # Using completely isolated static function.
     def test_22gb_gpu_smaller_than_32gb_gpu(self) -> None:
         """Use bytes_per_item large enough that neither budget saturates max_batch_size."""
         from src.prediction_scheduler import PredictionScheduler

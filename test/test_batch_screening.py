@@ -36,7 +36,7 @@ class BatchScreeningTestCase(unittest.TestCase):
 
             frame = load_screening_input(archive_path)
 
-        self.assertEqual(frame["chem_id"].tolist(), ["tylosin_scheme_b_unique_products::1", "tylosin_scheme_b_unique_products::2"])
+        self.assertEqual(frame["chem_id"].tolist(), ["tylosin_scheme_b_unique_products__1", "tylosin_scheme_b_unique_products__2"])
         self.assertEqual(frame["source_group"].tolist(), ["tylosin", "tylosin"])
 
     def test_load_screening_input_autogenerates_chem_id_inside_sqlite(self) -> None:
@@ -50,7 +50,7 @@ class BatchScreeningTestCase(unittest.TestCase):
 
             frame = load_screening_input(db_path)
 
-        self.assertEqual(frame["chem_id"].tolist(), ["molecules::1", "molecules::2"])
+        self.assertEqual(frame["chem_id"].tolist(), ["molecules__1", "molecules__2"])
         self.assertEqual(frame["source_group"].tolist(), ["molecules", "molecules"])
 
     def test_parser_exposes_screen_subcommand(self) -> None:
