@@ -110,6 +110,13 @@ Notes:
 - You can force the classifier backend with `MOLE_CLASSIFIER_BACKEND=timber`
   or `MOLE_CLASSIFIER_BACKEND=pickle`.
 
+## Change Index
+
+- [2026-04-21 subagent review fixes](docs/changes/2026-04-21-subagent-review-fixes.md)
+  - Timber auto-backend fallback hardening
+  - Repo-root-relative default pickle path
+  - Duplicate `chem_id` validation in `/score`
+
 ## API Endpoints
 
 - **Health Check**: `GET /health`
