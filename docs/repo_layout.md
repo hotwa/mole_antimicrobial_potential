@@ -76,6 +76,16 @@ Main utilities:
 - [`validate_scaffold.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/workflows/reinvent4/scripts/validate_scaffold.py)
   - Validate scaffold attachment points
 
+## Legacy Manual Test Scripts
+
+These are kept for historical/manual checks and are not part of the default
+automated test suite.
+
+- [`test/legacy/test_improvements.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/test/legacy/test_improvements.py)
+  - Old integration script for `/health`, `/mcp`, and validation flows
+- [`test/legacy/test_mcp_connection.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/test/legacy/test_mcp_connection.py)
+  - Old SSE/MCP connection smoke test
+
 ## Quick Rules
 
 - Use `pixi run mole doctor` before running anything on a new machine.
@@ -84,4 +94,3 @@ Main utilities:
 - Use `python mcp_server_enhanced.py` only when you specifically need MCP.
 - Use the scripts in `scripts/legacy/` only when reproducing older flows.
 - Use `workflows/reinvent4/scripts/` for all REINVENT4-specific automation.
-
