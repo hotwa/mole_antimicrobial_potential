@@ -16,7 +16,7 @@ import torch
 from scipy.stats.mstats import gmean
 from sklearn.preprocessing import OneHotEncoder
 
-from mole_representation import process_representation
+from src.mole_representation import process_representation
 from src.classifier_backend import inspect_classifier_backends, resolve_classifier_backend
 from src.models import MoleculeInfo, MoleculeInput, StatusModel
 

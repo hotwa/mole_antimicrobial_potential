@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-标准 FastMCP 服务器
-提供与 predict_api.py 相同的预测功能，但使用标准 MCP 协议
+标准 FastMCP 服务器（legacy）
+提供与 scripts/legacy/predict_api.py 相同的预测功能，但使用标准 MCP 协议
 """
 
 import os

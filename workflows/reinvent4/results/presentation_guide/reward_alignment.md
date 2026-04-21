@@ -150,7 +150,7 @@ apscore_total = ln(gmean_prob)
 
 同样逻辑也在：
 
-- [predict_api.py](/home/lingyuzeng/project/mole_antimicrobial_potential/predict_api.py#L352)
+- [scripts/legacy/predict_api.py](/home/lingyuzeng/project/mole_antimicrobial_potential/scripts/legacy/predict_api.py#L352)
 
 这里要特别强调方向：
 
@@ -483,7 +483,7 @@ gmean_prob = exp(apscore_total)
 ### 原始 MolE 聚合逻辑
 
 - [predictor.py](/home/lingyuzeng/project/mole_antimicrobial_potential/src/predictor.py#L177)
-- [predict_api.py](/home/lingyuzeng/project/mole_antimicrobial_potential/predict_api.py#L352)
+- [scripts/legacy/predict_api.py](/home/lingyuzeng/project/mole_antimicrobial_potential/scripts/legacy/predict_api.py#L352)
 
 ### `/score` 接口入口
 

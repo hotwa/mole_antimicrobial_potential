@@ -28,7 +28,7 @@ def parse_arguments():
     # Instantiate parser
     parser = argparse.ArgumentParser(prog="Represent molecular structures as using MolE.",
                                      description="This program recieves a file with SMILES and represents them using the MolE representation.",
-                                     usage="python mole_representation.py smiles_filepath output_filepath [options]",
+                                     usage="python src/mole_representation.py smiles_filepath output_filepath [options]",
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     
     # Input SMILES

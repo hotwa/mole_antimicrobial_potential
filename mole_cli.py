@@ -15,7 +15,7 @@ from typing import Any, Sequence
 import pandas as pd
 import torch
 
-from mole_representation import process_representation
+from src.mole_representation import process_representation
 from src.models import MoleculeInput, ReinventScoreRequest, ScoreObjective
 from src.reinvent4_workflow import load_objective_spec, resolve_path
 from src.reinvent_scoring import score_reinvent_predictions

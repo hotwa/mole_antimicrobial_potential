@@ -117,6 +117,15 @@ Notes:
   - Repo-root-relative default pickle path
   - Duplicate `chem_id` validation in `/score`
 
+## Repository Layout
+
+For a concise map from feature area to Python file, see:
+
+- [docs/repo_layout.md](docs/repo_layout.md)
+
+That document is the canonical reference for where the current entrypoints,
+legacy scripts, and workflow helpers live.
+
 ## API Endpoints
 
 - **Health Check**: `GET /health`

@@ -44,6 +44,10 @@
 REINVENT4 LibInvent 的运行脚本和模板见
 [workflows/reinvent4/README.md](/home/lingyuzeng/project/mole_antimicrobial_potential/workflows/reinvent4/README.md)。
 
+如果你需要查找“功能 -> Python 文件 -> 推荐用法”的映射，请看：
+
+- [docs/repo_layout.md](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/repo_layout.md)
+
 ---
 
 ## 3. 返回格式

@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, validator
 from scipy.stats.mstats import gmean
 from sklearn.preprocessing import OneHotEncoder
-from mole_representation import process_representation, load_pretrained_model
+from src.mole_representation import process_representation, load_pretrained_model
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -459,7 +459,7 @@ class AntimicrobialPredictor:
             return pred_df.reset_index().to_dict(orient="records")
 
 # Import health check
-from health_check import add_health_check
+from scripts.legacy.health_check import add_health_check
 
 # Create FastAPI app
 app = FastAPI(title="Antimicrobial Prediction MCP Tool")

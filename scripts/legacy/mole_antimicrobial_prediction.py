@@ -22,7 +22,7 @@ def parse_arguments():
                                         If it receives SMILES, it first featurizes the molecules using MolE, then makes predictions of antimicrobial activity.\
                                             By default, the program returns the antimicrobial predictive probabilities for each compound-strain pair.\
                                                 If the --aggregate_scores flag is set, then the program aggregates the predictions into an antimicrobial potential score and reports the number of strains inhibited by each compound.",
-                                     usage="python mole_antimicrobial_prediction.py input_filepath output_filepath [options]",
+                                     usage="python scripts/legacy/mole_antimicrobial_prediction.py input_filepath output_filepath [options]",
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     # Input file
     parser.add_argument("input_filepath", help="Complete path to input file. Can be a file with SMILES (make sure to set the --smiles_input flag) or a file with MolE representation.")
@@ -107,7 +107,7 @@ def read_representation(args):
     # Determine if input is smiles. If so, gather pre-trained representation
     if(args.smiles_input):
         # If input is SMILES, gather pre-trained representation
-        from mole_representation import process_representation
+        from src.mole_representation import process_representation
 
         udl_df = process_representation(dataset_path=args.input_filepath,
                                                     smile_column_str=args.smiles_colname,
