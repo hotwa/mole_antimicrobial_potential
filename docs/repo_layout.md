@@ -34,6 +34,8 @@ The shortest path for common tasks is:
   - `pixi run mole embed --smiles CCO`
 - Antimicrobial prediction:
   - `pixi run mole predict --smiles CCO`
+- Batch screening from CSV/TSV/archive inputs:
+  - `pixi run mole screen --input-path data/04.new_predictions/2026-04-21_screening/macro_split_ring16_scheme_b_fix_pos13_per_scaffold_2026-04-21.tar.gz --output-dir data/04.new_predictions/2026-04-21_screening/runs/demo`
 - REINVENT4 reward computation:
   - `pixi run mole score --objective-file workflows/reinvent4/inputs/objectives/pathogen_group_a.site_reward.prototype.json --smiles CCO`
 - REINVENT4 optimization:
@@ -69,6 +71,8 @@ Import these from other code instead of duplicating behavior:
   - MolE SMILES-to-embedding pipeline
 - [`src/predictor.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/predictor.py)
   - Shared antimicrobial predictor service
+- [`src/batch_screening.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/batch_screening.py)
+  - Batch ingestion and screening helpers for CSV/TSV/archive/SQLite inputs
 - [`src/classifier_backend.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/classifier_backend.py)
   - Timber/pickle backend selection
 - [`src/models.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/models.py)
@@ -133,6 +137,7 @@ automated test suite.
 
 - Use `pixi run mole doctor` before running anything on a new machine.
 - Use `pixi run mole predict` and `pixi run mole score` for day-to-day work.
+- Use `pixi run mole screen` for reusable batch screening of broad-spectrum candidates.
 - Use `python api_server.py` only when you specifically need the HTTP server.
 - Use `python mcp_server_enhanced.py` only when you specifically need MCP.
 - Use the scripts in `scripts/legacy/` only when reproducing older flows.

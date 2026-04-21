@@ -86,6 +86,11 @@ pixi run mole embed --smiles CCO
 # Predict strain-level antimicrobial probabilities
 pixi run mole predict --smiles CCO
 
+# Batch screen a CSV/TSV file or tar archive for broad-spectrum candidates
+pixi run mole screen \
+  --input-path data/04.new_predictions/2026-04-21_screening/macro_split_ring16_scheme_b_fix_pos13_per_scaffold_2026-04-21.tar.gz \
+  --output-dir data/04.new_predictions/2026-04-21_screening/runs/demo
+
 # Compute REINVENT4 rewards
 pixi run mole score \
   --objective-file workflows/reinvent4/inputs/objectives/pathogen_group_a.site_reward.prototype.json \
@@ -104,6 +109,9 @@ Notes:
 - `mole score` automatically fills `site_reward.scaffold_smiles` from
   `--scaffold-file` when the objective enables `site_reward` but does not embed
   a scaffold.
+- `mole screen` accepts CSV/TSV files, tar archive bundles, or SQLite
+  databases, auto-fills missing `chem_id` values, writes a total summary table
+  first, and also writes per-source grouped results under `by_source/`.
 - The default classifier backend is `auto`; Timber is used when the compiled
   artifact is available, otherwise the original pickle backend is used.
 - You can override the MolE checkpoint path with `MOLE_MOLE_MODEL_PATH`.

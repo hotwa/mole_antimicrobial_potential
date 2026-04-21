@@ -15,6 +15,7 @@ from typing import Any, Sequence
 import pandas as pd
 import torch
 
+from src.batch_screening import screen_path
 from src.mole_representation import process_representation
 from src.models import MoleculeInput, ReinventScoreRequest, ScoreObjective
 from src.reinvent4_workflow import load_objective_spec, resolve_path
@@ -70,6 +71,11 @@ def _write_embedding_output(df: pd.DataFrame, output: str | None, format_name: s
     _dump_json(df.to_dict(orient="records"), output)
 
 
+def _write_tsv(df: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(df.to_csv(sep="\t", index=False), encoding="utf-8")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mole", description="Unified MolE / Timber / REINVENT4 CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -111,6 +117,56 @@ def _build_parser() -> argparse.ArgumentParser:
     predict.add_argument("--app-threshold", type=float, default=0.04374140128493309, help="Growth inhibition threshold")
     predict.add_argument("--min-nkill", type=int, default=10, help="Broad-spectrum threshold")
     predict.add_argument("--output", help="Optional output file path")
+
+    screen = subparsers.add_parser(
+        "screen",
+        help="Batch screen CSV/TSV/archive/SQLite inputs for antimicrobial potential",
+    )
+    screen.add_argument("--input-path", required=True, help="Path to a TSV/CSV file or a tar archive bundle")
+    screen.add_argument("--output-dir", required=True, help="Directory where screening outputs will be written")
+    screen.add_argument("--smiles-colname", default="smiles", help="SMILES column name for tabular inputs")
+    screen.add_argument("--chem-id-colname", default="chem_id", help="chem_id column name for tabular inputs")
+    screen.add_argument(
+        "--archive-pattern",
+        default="*_scheme_b_unique_products.csv",
+        help="Filename pattern for CSV members inside tar archives",
+    )
+    screen.add_argument(
+        "--archive-smiles-colname",
+        default="product_smiles_canonical",
+        help="SMILES column name inside archive CSV members",
+    )
+    screen.add_argument(
+        "--archive-chem-id-colname",
+        default="example_combo_id",
+        help="chem_id column name inside archive CSV members",
+    )
+    screen.add_argument("--sqlite-table", help="SQLite table name to read when input is a database file")
+    screen.add_argument("--sqlite-query", help="SQLite query to read when input is a database file")
+    screen.add_argument(
+        "--no-dedupe-smiles",
+        dest="dedupe_smiles",
+        action="store_false",
+        help="Keep duplicate SMILES instead of collapsing to the first occurrence",
+    )
+    screen.set_defaults(dedupe_smiles=True)
+    score_group = screen.add_mutually_exclusive_group()
+    score_group.add_argument(
+        "--aggregate-scores",
+        dest="aggregate_scores",
+        action="store_true",
+        help="Return aggregate screening scores (default)",
+    )
+    score_group.add_argument(
+        "--per-strain",
+        dest="aggregate_scores",
+        action="store_false",
+        help="Return per-strain probabilities instead of aggregate scores",
+    )
+    screen.set_defaults(aggregate_scores=True)
+    screen.add_argument("--app-threshold", type=float, default=0.04374140128493309, help="Growth inhibition threshold")
+    screen.add_argument("--min-nkill", type=int, default=10, help="Broad-spectrum threshold")
+    screen.add_argument("--chunk-size", type=int, default=256, help="Batch size used while scoring")
 
     score = subparsers.add_parser("score", help="Compute REINVENT4 rewards from MolE probabilities")
     score.add_argument("--objective-file", required=True, help="Path to a normalized objective JSON file")
@@ -262,6 +318,87 @@ def _command_predict(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_screen(args: argparse.Namespace) -> int:
+    async def _run() -> dict[str, Any]:
+        frame, predicted = await screen_path(
+            input_path=args.input_path,
+            smiles_colname=getattr(args, "smiles_colname", "smiles"),
+            chem_id_colname=getattr(args, "chem_id_colname", "chem_id"),
+            archive_pattern=getattr(args, "archive_pattern", "*_scheme_b_unique_products.csv"),
+            archive_smiles_colname=getattr(args, "archive_smiles_colname", "product_smiles_canonical"),
+            archive_chem_id_colname=getattr(args, "archive_chem_id_colname", "example_combo_id"),
+            sqlite_table=getattr(args, "sqlite_table", None),
+            sqlite_query=getattr(args, "sqlite_query", None),
+            dedupe_smiles=bool(getattr(args, "dedupe_smiles", True)),
+            aggregate_scores=bool(getattr(args, "aggregate_scores", True)),
+            app_threshold=float(getattr(args, "app_threshold", 0.04374140128493309)),
+            min_nkill=int(getattr(args, "min_nkill", 10)),
+            chunk_size=int(getattr(args, "chunk_size", 256)),
+        )
+
+        if bool(getattr(args, "aggregate_scores", True)):
+            rank_columns: list[str] = []
+            ascending: list[bool] = []
+            if "broad_spectrum" in predicted.columns:
+                rank_columns.append("broad_spectrum")
+                ascending.append(False)
+            if "ginhib_total" in predicted.columns:
+                rank_columns.append("ginhib_total")
+                ascending.append(False)
+            if "apscore_total" in predicted.columns:
+                rank_columns.append("apscore_total")
+                ascending.append(True)
+            if "input_order" in predicted.columns:
+                rank_columns.append("input_order")
+                ascending.append(True)
+            if rank_columns:
+                predicted = predicted.sort_values(rank_columns, ascending=ascending, kind="stable")
+        else:
+            rank_columns = [column for column in ["input_order", "strain_name"] if column in predicted.columns]
+            if rank_columns:
+                predicted = predicted.sort_values(rank_columns, kind="stable")
+
+        output_dir = Path(args.output_dir).expanduser().resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        normalized_input_path = output_dir / "normalized_input.tsv"
+        predictions_all_path = output_dir / "predictions_all.tsv"
+        _write_tsv(frame, normalized_input_path)
+        _write_tsv(predicted, predictions_all_path)
+
+        grouped_outputs: list[dict[str, str]] = []
+        if "source_group" in predicted.columns:
+            for source_group, group_frame in predicted.groupby("source_group", sort=True):
+                group_dir = output_dir / "by_source" / str(source_group)
+                group_path = group_dir / "predictions.tsv"
+                _write_tsv(group_frame, group_path)
+                grouped_outputs.append({"source_group": str(source_group), "path": str(group_path)})
+
+        manifest = {
+            "input_path": str(Path(args.input_path).expanduser().resolve()),
+            "output_dir": str(output_dir),
+            "dedupe_smiles": bool(args.dedupe_smiles),
+            "aggregate_scores": bool(args.aggregate_scores),
+            "app_threshold": float(args.app_threshold),
+            "min_nkill": int(args.min_nkill),
+            "chunk_size": int(args.chunk_size),
+            "normalized_rows": int(len(frame)),
+            "predicted_rows": int(len(predicted)),
+            "normalized_input": str(normalized_input_path),
+            "predictions_all": str(predictions_all_path),
+            "grouped_outputs": grouped_outputs,
+        }
+        (output_dir / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        return manifest
+
+    payload = asyncio_run(_run())
+    _dump_json(payload, None)
+    return 0
+
+
 def _command_score(args: argparse.Namespace) -> int:
     objective_dict = load_objective_spec(args.objective_file)
     site_reward = objective_dict.get("site_reward")
@@ -352,6 +489,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _command_embed(args)
     if args.command == "predict":
         return _command_predict(args)
+    if args.command == "screen":
+        return _command_screen(args)
     if args.command == "score":
         return _command_score(args)
     if args.command == "optimize":
