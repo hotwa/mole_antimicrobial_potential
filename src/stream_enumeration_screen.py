@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import multiprocessing as mp
+import os
+from collections import deque
+from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, AsyncIterator, Callable, Mapping, Sequence
 
 import pandas as pd
 from rdkit import Chem
@@ -39,6 +44,8 @@ HIT_COLUMNS = [
     "shard_id",
     "scaffold_slug",
 ]
+
+_MATERIALIZATION_CONTEXT: dict[str, Any] | None = None
 
 
 def _utc_now() -> str:
@@ -326,6 +333,13 @@ def _build_parameter_snapshot(
     app_threshold: float,
     min_nkill: int,
     classifier_backend: str,
+    num_graph_workers: int | str,
+    graph_batch_size: int,
+    prefetch_batches: int,
+    classifier_workers: int | str,
+    classifier_inflight_batches: int | str,
+    enumeration_workers: int | str,
+    enumeration_prefetch_batches: int | str,
     deterministic_representation: bool,
     space: IndexSpace,
     scaffolds: Sequence[ScaffoldEntry],
@@ -345,6 +359,13 @@ def _build_parameter_snapshot(
         "app_threshold": float(app_threshold),
         "min_nkill": int(min_nkill),
         "classifier_backend": str(classifier_backend),
+        "num_graph_workers": str(num_graph_workers),
+        "graph_batch_size": int(graph_batch_size),
+        "prefetch_batches": int(prefetch_batches),
+        "classifier_workers": str(classifier_workers),
+        "classifier_inflight_batches": str(classifier_inflight_batches),
+        "enumeration_workers": str(enumeration_workers),
+        "enumeration_prefetch_batches": str(enumeration_prefetch_batches),
         "deterministic_representation": bool(deterministic_representation),
         "counts": asdict(space),
         "per_scaffold_total_combinations": int(space.per_scaffold_combinations),
@@ -419,6 +440,165 @@ def _materialize_batch(
     return rows
 
 
+def _init_materialization_worker(
+    space: IndexSpace,
+    scaffolds: Sequence[ScaffoldEntry],
+    ordinary_fragments: Sequence[str],
+    pos13_fragments: Sequence[str],
+) -> None:
+    global _MATERIALIZATION_CONTEXT
+    _MATERIALIZATION_CONTEXT = {
+        "space": space,
+        "scaffolds": tuple(scaffolds),
+        "ordinary_fragments": tuple(ordinary_fragments),
+        "pos13_fragments": tuple(pos13_fragments),
+    }
+
+
+def _materialize_batch_in_worker(start_idx: int, end_idx: int) -> list[dict[str, Any]]:
+    if _MATERIALIZATION_CONTEXT is None:
+        raise RuntimeError("materialization worker context not initialized")
+    return _materialize_batch(
+        start_idx=start_idx,
+        end_idx=end_idx,
+        space=_MATERIALIZATION_CONTEXT["space"],
+        scaffolds=_MATERIALIZATION_CONTEXT["scaffolds"],
+        ordinary_fragments=_MATERIALIZATION_CONTEXT["ordinary_fragments"],
+        pos13_fragments=_MATERIALIZATION_CONTEXT["pos13_fragments"],
+    )
+
+
+def _resolve_enumeration_workers(value: int | str | None) -> int:
+    if value in (None, "auto"):
+        cpu_count = os.cpu_count() or 1
+        return max(1, min(4, cpu_count // 2 or 1))
+    workers = int(value)
+    if workers <= 0:
+        raise ValueError("enumeration_workers must be positive")
+    return workers
+
+
+def _resolve_enumeration_prefetch_batches(value: int | str | None, *, workers: int) -> int:
+    if value in (None, "auto"):
+        return max(1, min(4, workers))
+    batches = int(value)
+    if batches <= 0:
+        raise ValueError("enumeration_prefetch_batches must be positive")
+    return batches
+
+
+class _ProcessMaterializationExecutor:
+    mode = "process"
+
+    def __init__(
+        self,
+        *,
+        max_workers: int,
+        space: IndexSpace,
+        scaffolds: Sequence[ScaffoldEntry],
+        ordinary_fragments: Sequence[str],
+        pos13_fragments: Sequence[str],
+    ) -> None:
+        self._executor = ProcessPoolExecutor(
+            max_workers=max_workers,
+            mp_context=mp.get_context("spawn"),
+            initializer=_init_materialization_worker,
+            initargs=(
+                space,
+                tuple(scaffolds),
+                tuple(ordinary_fragments),
+                tuple(pos13_fragments),
+            ),
+        )
+
+    def submit_materialize_batch(self, *, batch_start: int, batch_end: int) -> Future[list[dict[str, Any]]]:
+        return self._executor.submit(_materialize_batch_in_worker, batch_start, batch_end)
+
+    def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+        self._executor.shutdown(wait=wait, cancel_futures=cancel_futures)
+
+
+def _create_materialization_executor(
+    *,
+    max_workers: int,
+    space: IndexSpace,
+    scaffolds: Sequence[ScaffoldEntry],
+    ordinary_fragments: Sequence[str],
+    pos13_fragments: Sequence[str],
+) -> Any:
+    return _ProcessMaterializationExecutor(
+        max_workers=max_workers,
+        space=space,
+        scaffolds=scaffolds,
+        ordinary_fragments=ordinary_fragments,
+        pos13_fragments=pos13_fragments,
+    )
+
+
+def _submit_enumeration_batch(
+    executor: Any,
+    pending: deque[tuple[int, int, Future[list[dict[str, Any]]]]],
+    *,
+    batch_start: int,
+    batch_end: int,
+) -> None:
+    future = executor.submit_materialize_batch(batch_start=batch_start, batch_end=batch_end)
+    pending.append((batch_start, batch_end, future))
+
+
+async def _iter_materialized_batches(
+    *,
+    executor: Any,
+    shard_start: int,
+    shard_end: int,
+    prediction_batch_size: int,
+    enumeration_prefetch_batches: int,
+    on_prefetch_state_change: Callable[[int, int], None] | None = None,
+) -> AsyncIterator[tuple[int, int, list[dict[str, Any]]]]:
+    pending: deque[tuple[int, int, Future[list[dict[str, Any]]]]] = deque()
+    next_batch_start = shard_start
+    current_future: Future[list[dict[str, Any]]] | None = None
+
+    def _publish_prefetch_state() -> None:
+        if on_prefetch_state_change is not None:
+            on_prefetch_state_change(len(pending), enumeration_prefetch_batches)
+
+    try:
+        while next_batch_start < shard_end and len(pending) < enumeration_prefetch_batches:
+            batch_end = min(shard_end, next_batch_start + prediction_batch_size)
+            _submit_enumeration_batch(
+                executor,
+                pending,
+                batch_start=next_batch_start,
+                batch_end=batch_end,
+            )
+            next_batch_start = batch_end
+            _publish_prefetch_state()
+
+        while pending:
+            batch_start, batch_end, future = pending.popleft()
+            current_future = future
+            batch_rows = await asyncio.wrap_future(future)
+            current_future = None
+            if next_batch_start < shard_end:
+                next_batch_end = min(shard_end, next_batch_start + prediction_batch_size)
+                _submit_enumeration_batch(
+                    executor,
+                    pending,
+                    batch_start=next_batch_start,
+                    batch_end=next_batch_end,
+                )
+                next_batch_start = next_batch_end
+            _publish_prefetch_state()
+            yield batch_start, batch_end, batch_rows
+    finally:
+        if current_future is not None and not current_future.done():
+            current_future.cancel()
+        for _, _, future in pending:
+            if not future.done():
+                future.cancel()
+
+
 async def stream_enumeration_screen(
     *,
     output_dir: str | Path,
@@ -440,6 +620,10 @@ async def stream_enumeration_screen(
     num_graph_workers: int | str = "auto",
     graph_batch_size: int = 1024,
     prefetch_batches: int = 2,
+    classifier_workers: int | str = "auto",
+    classifier_inflight_batches: int | str = "auto",
+    enumeration_workers: int | str = "auto",
+    enumeration_prefetch_batches: int | str = "auto",
     deterministic_representation: bool = False,
     enable_profiling: bool = False,
     fail_after_shards: int | None = None,
@@ -483,6 +667,13 @@ async def stream_enumeration_screen(
         app_threshold=app_threshold,
         min_nkill=min_nkill,
         classifier_backend=classifier_backend,
+        num_graph_workers=num_graph_workers,
+        graph_batch_size=graph_batch_size,
+        prefetch_batches=prefetch_batches,
+        classifier_workers=classifier_workers,
+        classifier_inflight_batches=classifier_inflight_batches,
+        enumeration_workers=enumeration_workers,
+        enumeration_prefetch_batches=enumeration_prefetch_batches,
         deterministic_representation=deterministic_representation,
         space=space,
         scaffolds=scaffolds,
@@ -501,15 +692,56 @@ async def stream_enumeration_screen(
         num_graph_workers=num_graph_workers,
         graph_batch_size=graph_batch_size,
         prefetch_batches=prefetch_batches,
+        classifier_workers=classifier_workers,
+        classifier_inflight_batches=classifier_inflight_batches,
         deterministic_representation=deterministic_representation,
+    )
+    resolved_enumeration_workers = _resolve_enumeration_workers(enumeration_workers)
+    resolved_enumeration_prefetch_batches = _resolve_enumeration_prefetch_batches(
+        enumeration_prefetch_batches,
+        workers=resolved_enumeration_workers,
     )
 
     attempted_total = 0
     hit_total = 0
     completed_shards = 0
+    runtime_state: dict[str, Any] = {
+        "materialization_mode": "process",
+        "resolved_enumeration_workers": resolved_enumeration_workers,
+        "resolved_enumeration_prefetch_batches": resolved_enumeration_prefetch_batches,
+        "current_shard_id": None,
+        "pending_materialized_batches": 0,
+        "max_pending_materialized_batches": 0,
+        "prefetch_depth": {
+            "current": 0,
+            "configured": resolved_enumeration_prefetch_batches,
+        },
+    }
+
+    def _set_prefetch_state(pending_batches: int, prefetch_limit: int) -> None:
+        runtime_state["pending_materialized_batches"] = int(pending_batches)
+        runtime_state["max_pending_materialized_batches"] = max(
+            int(runtime_state["max_pending_materialized_batches"]),
+            int(pending_batches),
+        )
+        runtime_state["prefetch_depth"] = {
+            "current": int(pending_batches),
+            "configured": int(prefetch_limit),
+        }
+
+    def _sync_manifest_runtime(record: dict[str, Any]) -> None:
+        record["runtime"] = {
+            "materialization_mode": runtime_state["materialization_mode"],
+            "resolved_enumeration_workers": runtime_state["resolved_enumeration_workers"],
+            "resolved_enumeration_prefetch_batches": runtime_state["resolved_enumeration_prefetch_batches"],
+            "pending_materialized_batches": runtime_state["pending_materialized_batches"],
+            "max_pending_materialized_batches": runtime_state["max_pending_materialized_batches"],
+            "prefetch_depth": dict(runtime_state["prefetch_depth"]),
+        }
 
     def _write_run_state(status: str, error: str | None = None) -> None:
         completed_records = [record for record in manifest_records.values() if record["status"] == "completed"]
+        scheduler_snapshot = scheduler.runtime_snapshot() if hasattr(scheduler, "runtime_snapshot") else None
         payload = {
             "status": status,
             "updated_at": _utc_now(),
@@ -524,10 +756,24 @@ async def stream_enumeration_screen(
                 "upstream_run_state": _read_optional_json(run_state_source),
                 "chunk_manifest_preview": _read_optional_tabular_preview(chunk_manifest_source),
             },
+            "runtime": {
+                **runtime_state,
+                "prefetch_depth": dict(runtime_state["prefetch_depth"]),
+                "attempted_count": sum(int(record.get("attempted_count", 0)) for record in manifest_records.values()),
+                "hit_count": sum(int(record.get("hit_count", 0)) for record in manifest_records.values()),
+                "scheduler": scheduler_snapshot,
+            },
             "error": error,
         }
         _write_json_atomic(run_state_path, payload)
 
+    materialization_executor = _create_materialization_executor(
+        max_workers=resolved_enumeration_workers,
+        space=space,
+        scaffolds=scaffolds,
+        ordinary_fragments=ordinary_fragments,
+        pos13_fragments=pos13_fragments,
+    )
     _write_run_state("running")
     _write_manifest_atomic(shard_manifest_path, manifest_records)
 
@@ -555,47 +801,135 @@ async def stream_enumeration_screen(
                     "error": None,
                 }
             )
+            runtime_state["current_shard_id"] = shard_id
+            _set_prefetch_state(0, resolved_enumeration_prefetch_batches)
+            _sync_manifest_runtime(record)
             _write_manifest_atomic(shard_manifest_path, manifest_records)
             _write_run_state("running")
 
             shard_hits: list[pd.DataFrame] = []
             shard_attempted = 0
-            for batch_start in range(shard_start, shard_end, prediction_batch_size):
-                batch_end = min(shard_end, batch_start + prediction_batch_size)
-                batch_rows = _materialize_batch(
-                    start_idx=batch_start,
-                    end_idx=batch_end,
-                    space=space,
-                    scaffolds=scaffolds,
-                    ordinary_fragments=ordinary_fragments,
-                    pos13_fragments=pos13_fragments,
-                )
-                shard_attempted += len(batch_rows)
-                molecule_rows = [MoleculeInfo(smiles=row["smiles"], chem_id=row["chem_id"]) for row in batch_rows]
-                predicted = await scheduler.predict_molecules(
-                    molecules=molecule_rows,
-                    aggregate_scores=True,
-                    app_threshold=app_threshold,
-                    min_nkill=min_nkill,
-                    num_graph_workers=num_graph_workers,
-                    graph_batch_size=graph_batch_size,
-                    prefetch_batches=prefetch_batches,
-                    enable_profiling=enable_profiling,
-                    deterministic_representation=deterministic_representation,
-                )
-                predicted_frame = pd.DataFrame(predicted)
-                metadata_frame = pd.DataFrame(batch_rows)
-                merged = predicted_frame.merge(metadata_frame, on="chem_id", how="left")
-                hits = merged[(merged["broad_spectrum"] == 1) | (merged["ginhib_total"] >= min_nkill)].copy()
-                if not hits.empty:
-                    hits["shard_id"] = shard_id
-                    shard_hits.append(hits[HIT_COLUMNS].reset_index(drop=True))
+            shard_hit_count = 0
+            # True producer-consumer pipeline:
+            # - Materialization task: reads from ProcessPoolExecutor, puts into materialized_queue
+            # - Prediction task: reads from materialized_queue, predicts, puts into result_queue
+            # - Main loop: reads from result_queue, updates state
+            materialized_queue: asyncio.Queue[
+                tuple[int, int, list[dict[str, Any]]] | BaseException | None
+            ] = asyncio.Queue(maxsize=max(2, resolved_enumeration_prefetch_batches))
+            result_queue: asyncio.Queue[
+                tuple[int, pd.DataFrame | BaseException]
+            ] = asyncio.Queue()
+
+            async def _materialization_producer() -> None:
+                """Read from ProcessPoolExecutor and put materialized batches into queue."""
+                try:
+                    async for batch_start, batch_end, batch_rows in _iter_materialized_batches(
+                        executor=materialization_executor,
+                        shard_start=shard_start,
+                        shard_end=shard_end,
+                        prediction_batch_size=prediction_batch_size,
+                        enumeration_prefetch_batches=resolved_enumeration_prefetch_batches,
+                        on_prefetch_state_change=_set_prefetch_state,
+                    ):
+                        await materialized_queue.put((batch_start, batch_end, batch_rows))
+                except BaseException as exc:
+                    await materialized_queue.put(exc)
+                finally:
+                    await materialized_queue.put(None)  # Sentinel
+
+            async def _prediction_consumer() -> None:
+                """Read from materialized_queue, predict, and put results into result_queue."""
+                try:
+                    while True:
+                        item = await materialized_queue.get()
+                        if item is None:
+                            break
+                        if isinstance(item, BaseException):
+                            await result_queue.put((0, item))
+                            break
+
+                        batch_start, batch_end, batch_rows = item
+                        try:
+                            molecule_rows = [MoleculeInfo(smiles=row["smiles"], chem_id=row["chem_id"]) for row in batch_rows]
+                            predicted = await scheduler.predict_molecules(
+                                molecules=molecule_rows,
+                                aggregate_scores=True,
+                                app_threshold=app_threshold,
+                                min_nkill=min_nkill,
+                                num_graph_workers=num_graph_workers,
+                                graph_batch_size=graph_batch_size,
+                                prefetch_batches=prefetch_batches,
+                                enable_profiling=enable_profiling,
+                                deterministic_representation=deterministic_representation,
+                            )
+                            predicted_frame = pd.DataFrame(predicted)
+                            metadata_frame = pd.DataFrame(batch_rows)
+                            merged = predicted_frame.merge(metadata_frame, on="chem_id", how="left")
+                            hits = merged[(merged["broad_spectrum"] == 1) | (merged["ginhib_total"] >= min_nkill)].copy()
+                            if not hits.empty:
+                                hits["shard_id"] = shard_id
+                                hits = hits[HIT_COLUMNS].reset_index(drop=True)
+                            else:
+                                hits = None
+                            await result_queue.put((len(batch_rows), hits))
+                        except BaseException as exc:
+                            await result_queue.put((len(batch_rows), exc))
+                except BaseException as exc:
+                    await result_queue.put((0, exc))
+
+            # Start both tasks
+            materialization_task = asyncio.create_task(_materialization_producer())
+            prediction_task = asyncio.create_task(_prediction_consumer())
+
+            try:
+                # Process results from the prediction queue
+                completed_predictions = 0
+                expected_predictions = None  # Will be set when we know the total
+
+                while True:
+                    item = await result_queue.get()
+                    batch_count, result = item
+                    shard_attempted += batch_count
+
+                    if isinstance(result, BaseException):
+                        raise result
+
+                    if result is not None and not result.empty:
+                        shard_hits.append(result)
+                        shard_hit_count += len(result)
+
+                    record.update(
+                        {
+                            "attempted_count": shard_attempted,
+                            "hit_count": shard_hit_count,
+                            "updated_at": _utc_now(),
+                        }
+                    )
+                    _sync_manifest_runtime(record)
+                    _write_manifest_atomic(shard_manifest_path, manifest_records)
+                    _write_run_state("running")
+
+                    # Check if both tasks are done and queue is empty
+                    if materialization_task.done() and prediction_task.done() and result_queue.empty():
+                        break
+            finally:
+                # Cancel tasks if we're exiting early
+                for task in (materialization_task, prediction_task):
+                    if not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except (asyncio.CancelledError, Exception):
+                            pass
 
             hits_frame = pd.concat(shard_hits, ignore_index=True) if shard_hits else pd.DataFrame(columns=HIT_COLUMNS)
             temp_output.parent.mkdir(parents=True, exist_ok=True)
             hits_frame.to_parquet(temp_output, index=False)
             temp_output.replace(output_file)
 
+            _set_prefetch_state(0, resolved_enumeration_prefetch_batches)
+            runtime_state["current_shard_id"] = None
             record.update(
                 {
                     "status": "completed",
@@ -606,6 +940,7 @@ async def stream_enumeration_screen(
                     "error": None,
                 }
             )
+            _sync_manifest_runtime(record)
             _write_manifest_atomic(shard_manifest_path, manifest_records)
             _write_run_state("running")
 
@@ -618,6 +953,8 @@ async def stream_enumeration_screen(
 
     except BaseException as exc:
         terminal_status = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
+        _set_prefetch_state(0, resolved_enumeration_prefetch_batches)
+        runtime_state["current_shard_id"] = None
         failing_record = next(
             (record for record in manifest_records.values() if record.get("status") == "in_progress"),
             None,
@@ -630,10 +967,15 @@ async def stream_enumeration_screen(
                     "error": str(exc),
                 }
             )
+            _sync_manifest_runtime(failing_record)
         _write_manifest_atomic(shard_manifest_path, manifest_records)
         _write_run_state(terminal_status, error=str(exc))
         raise
+    finally:
+        materialization_executor.shutdown(wait=False, cancel_futures=True)
 
+    _set_prefetch_state(0, resolved_enumeration_prefetch_batches)
+    runtime_state["current_shard_id"] = None
     _write_manifest_atomic(shard_manifest_path, manifest_records)
     _write_run_state("completed")
     return StreamScreenSummary(

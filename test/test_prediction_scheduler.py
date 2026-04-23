@@ -438,6 +438,9 @@ class TestModelReuse(unittest.TestCase):
                 "prediction_frame_seconds": 0.2,
                 "growth_inhibition_seconds": 0.1,
                 "aggregate_scores_seconds": 0.3,
+                "classifier_stage_seconds": 0.9,
+                "classifier_workers": 3,
+                "classifier_inflight_batches": 5,
                 "xgboost_seconds": 0.5,
                 "graph_build": {"graph_total_seconds": 0.25, "graph_items": 1},
             }
@@ -458,11 +461,15 @@ class TestModelReuse(unittest.TestCase):
                 app_threshold=0.04374,
                 min_nkill=10,
                 enable_profiling=True,
+                classifier_workers=3,
+                classifier_inflight_batches=5,
             )
         )
 
         _, kwargs = mock_predictor.predict.call_args
         self.assertTrue(kwargs["enable_profiling"])
+        self.assertEqual(kwargs["classifier_workers"], 3)
+        self.assertEqual(kwargs["classifier_inflight_batches"], 5)
         self.assertEqual(
             sched.runtime_snapshot()["last_profile"]["graph_build"]["graph_items"],
             1,
@@ -470,6 +477,18 @@ class TestModelReuse(unittest.TestCase):
         self.assertAlmostEqual(
             sched.runtime_snapshot()["last_profile"]["aggregate_scores_seconds"],
             0.3,
+        )
+        self.assertAlmostEqual(
+            sched.runtime_snapshot()["last_profile"]["classifier_stage_seconds"],
+            0.9,
+        )
+        self.assertEqual(
+            sched.runtime_snapshot()["last_profile"]["classifier_workers"],
+            3,
+        )
+        self.assertEqual(
+            sched.runtime_snapshot()["last_profile"]["classifier_inflight_batches"],
+            5,
         )
 
     def test_predict_molecules_aggregates_profiles_across_internal_chunks(self) -> None:
@@ -490,6 +509,9 @@ class TestModelReuse(unittest.TestCase):
                     "prediction_frame_seconds": 0.2,
                     "growth_inhibition_seconds": 0.05,
                     "aggregate_scores_seconds": 0.3,
+                    "classifier_stage_seconds": 0.95,
+                    "classifier_workers": 2,
+                    "classifier_inflight_batches": 4,
                     "xgboost_seconds": 0.5,
                     "graph_build": {
                         "graph_items": 2,
@@ -510,6 +532,9 @@ class TestModelReuse(unittest.TestCase):
                     "prediction_frame_seconds": 0.3,
                     "growth_inhibition_seconds": 0.06,
                     "aggregate_scores_seconds": 0.4,
+                    "classifier_stage_seconds": 1.26,
+                    "classifier_workers": 2,
+                    "classifier_inflight_batches": 4,
                     "xgboost_seconds": 0.6,
                     "graph_build": {
                         "graph_items": 2,
@@ -530,6 +555,9 @@ class TestModelReuse(unittest.TestCase):
                     "prediction_frame_seconds": 0.4,
                     "growth_inhibition_seconds": 0.07,
                     "aggregate_scores_seconds": 0.5,
+                    "classifier_stage_seconds": 1.57,
+                    "classifier_workers": 2,
+                    "classifier_inflight_batches": 4,
                     "xgboost_seconds": 0.7,
                     "graph_build": {
                         "graph_items": 1,
@@ -572,6 +600,9 @@ class TestModelReuse(unittest.TestCase):
         self.assertAlmostEqual(profile["prediction_frame_seconds"], 0.9)
         self.assertAlmostEqual(profile["growth_inhibition_seconds"], 0.18)
         self.assertAlmostEqual(profile["aggregate_scores_seconds"], 1.2)
+        self.assertAlmostEqual(profile["classifier_stage_seconds"], 3.78)
+        self.assertEqual(profile["classifier_workers"], 2)
+        self.assertEqual(profile["classifier_inflight_batches"], 4)
         self.assertEqual(profile["graph_build"]["graph_items"], 5)
         self.assertAlmostEqual(profile["graph_build"]["graph_total_seconds"], 3.6)
         self.assertAlmostEqual(profile["graph_build"]["bond_feature_seconds"], 1.5)
@@ -594,6 +625,8 @@ class TestRuntimeSnapshot(unittest.TestCase):
         "free_memory_bytes",
         "selected_batch_size",
         "used_cuda",
+        "classifier_workers",
+        "classifier_inflight_batches",
     }
 
     def test_snapshot_contains_required_fields(self) -> None:
@@ -608,11 +641,15 @@ class TestRuntimeSnapshot(unittest.TestCase):
             max_batch_size=256,
             min_batch_size=1,
             target_memory_fraction=0.80,
+            classifier_workers=6,
+            classifier_inflight_batches=9,
         )
 
         snap = sched.runtime_snapshot()
         for field in self.REQUIRED_FIELDS:
             self.assertIn(field, snap, f"Snapshot missing required field '{field}'")
+        self.assertEqual(snap["classifier_workers"], 6)
+        self.assertEqual(snap["classifier_inflight_batches"], 9)
 
     def test_snapshot_selected_batch_size_matches_current(self) -> None:
         from src.prediction_scheduler import PredictionScheduler

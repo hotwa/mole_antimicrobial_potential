@@ -18,6 +18,7 @@ import torch
 from src.batch_screening import screen_path
 from src.mole_representation import process_representation
 from src.preprocess_screening_input import preprocess_to_parquet
+from src.screening_process_pipeline import process_screen_config_from_args, screen_paths_multiprocess
 from src.stream_enumeration_screen import (
     DEFAULT_SCAFFOLD_FILE as DEFAULT_STREAM_SCAFFOLD_FILE,
     stream_enumeration_screen,
@@ -156,6 +157,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Prefetched graph mini-batches per worker",
     )
     predict.add_argument(
+        "--classifier-workers",
+        default="auto",
+        help="CPU workers used for post-MolE classifier/aggregation overlap",
+    )
+    predict.add_argument(
+        "--classifier-inflight-batches",
+        default="auto",
+        help="Maximum aggregate-classifier batches kept in flight ahead of ordered merge",
+    )
+    predict.add_argument(
         "--profiling",
         action="store_true",
         help="Emit stage profiling for MolE graph build and prediction",
@@ -191,8 +202,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "screen",
         help="Batch screen CSV/TSV/archive/SQLite inputs for antimicrobial potential",
     )
-    screen.add_argument("--input-path", required=True, help="Path to a TSV/CSV file or a tar archive bundle")
+    screen.add_argument(
+        "--input-path",
+        action="append",
+        required=True,
+        help="One or more CSV/TSV/Parquet/SQLite/tar inputs. Repeat the flag for multiple sources.",
+    )
     screen.add_argument("--output-dir", required=True, help="Directory where screening outputs will be written")
+    screen.add_argument(
+        "--execution-mode",
+        choices=["thread", "process"],
+        default="thread",
+        help="Use thread mode for current behavior or process mode for CPU-heavy producer pools.",
+    )
     screen.add_argument("--smiles-colname", default="smiles", help="SMILES column name for tabular inputs")
     screen.add_argument("--chem-id-colname", default="chem_id", help="chem_id column name for tabular inputs")
     screen.add_argument(
@@ -251,12 +273,45 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Number of CPU workers for preprocessing (default: auto)"
     )
     tune_group.add_argument(
+        "--producer-processes",
+        default="auto",
+        help="Number of producer processes to use in process execution mode",
+    )
+    tune_group.add_argument(
         "--target-rows-per-group", default="auto",
         help="Target number of rows per group for chunking (default: auto)"
     )
     tune_group.add_argument(
         "--target-bytes-per-group", default="auto",
         help="Target bytes per group for chunking in auto mode (default: auto)"
+    )
+    tune_group.add_argument(
+        "--predict-queue-max-batches",
+        default="auto",
+        help="Bound on ready-to-predict batches queued in process execution mode",
+    )
+    tune_group.add_argument(
+        "--result-queue-max-batches",
+        default="auto",
+        help="Bound on predicted result batches queued in process execution mode",
+    )
+    tune_group.add_argument(
+        "--batch-checkpoint-size",
+        type=int,
+        default=2048,
+        help="Rows per checkpoint commit for resumable process execution mode",
+    )
+    tune_group.add_argument(
+        "--rows-per-shard",
+        type=int,
+        default=100000,
+        help="Rows per prepared Parquet shard in process execution mode",
+    )
+    tune_group.add_argument(
+        "--row-group-size",
+        type=int,
+        default=4096,
+        help="Parquet row-group size for process-mode preprocessing",
     )
     tune_group.add_argument(
         "--input-chunk-size", "--chunk-size", type=int, default=10000, dest="input_chunk_size",
@@ -290,6 +345,16 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=2,
         help="Prefetched graph mini-batches per worker",
+    )
+    tune_group.add_argument(
+        "--classifier-workers",
+        default="auto",
+        help="CPU workers used for post-MolE classifier/aggregation overlap",
+    )
+    tune_group.add_argument(
+        "--classifier-inflight-batches",
+        default="auto",
+        help="Maximum aggregate-classifier batches kept in flight ahead of ordered merge",
     )
     tune_group.add_argument(
         "--deterministic-representation",
@@ -329,6 +394,16 @@ def _build_parser() -> argparse.ArgumentParser:
     stream.add_argument("--shard-size", type=int, default=100000, help="Combinations per resumable shard")
     stream.add_argument("--prediction-batch-size", type=int, default=1024, help="Combinations per prediction call inside a shard")
     stream.add_argument(
+        "--enumeration-workers",
+        default="auto",
+        help="CPU workers used to materialize enumeration batches ahead of prediction",
+    )
+    stream.add_argument(
+        "--enumeration-prefetch-batches",
+        default="auto",
+        help="Bounded number of enumeration batches kept in flight ahead of ordered prediction",
+    )
+    stream.add_argument(
         "--classifier-backend",
         choices=["auto", "timber", "pickle"],
         help="Classifier backend for aggregate screening predictions.",
@@ -351,6 +426,16 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=2,
         help="Prefetched graph mini-batches per worker",
+    )
+    stream.add_argument(
+        "--classifier-workers",
+        default="auto",
+        help="CPU workers used for post-MolE classifier/aggregation overlap",
+    )
+    stream.add_argument(
+        "--classifier-inflight-batches",
+        default="auto",
+        help="Maximum aggregate-classifier batches kept in flight ahead of ordered merge",
     )
     stream.add_argument(
         "--deterministic-representation",
@@ -497,6 +582,8 @@ async def _predict_async(args: argparse.Namespace) -> dict[str, Any]:
         num_graph_workers=getattr(args, "num_graph_workers", "auto"),
         graph_batch_size=int(getattr(args, "graph_batch_size", 1024)),
         prefetch_batches=int(getattr(args, "prefetch_batches", 2)),
+        classifier_workers=getattr(args, "classifier_workers", "auto"),
+        classifier_inflight_batches=getattr(args, "classifier_inflight_batches", "auto"),
         deterministic_representation=bool(getattr(args, "deterministic_representation", False)),
     )
     normalized = MoleculeInput(
@@ -514,6 +601,8 @@ async def _predict_async(args: argparse.Namespace) -> dict[str, Any]:
         num_graph_workers=getattr(args, "num_graph_workers", "auto"),
         graph_batch_size=int(getattr(args, "graph_batch_size", 1024)),
         prefetch_batches=int(getattr(args, "prefetch_batches", 2)),
+        classifier_workers=getattr(args, "classifier_workers", "auto"),
+        classifier_inflight_batches=getattr(args, "classifier_inflight_batches", "auto"),
         enable_profiling=bool(getattr(args, "profiling", False)),
         deterministic_representation=bool(getattr(args, "deterministic_representation", False)),
     )
@@ -553,71 +642,165 @@ def _command_benchmark_screening_inputs(args: argparse.Namespace) -> int:
 def _command_screen(args: argparse.Namespace) -> int:
     async def _run() -> dict[str, Any]:
         _apply_classifier_backend_arg(args)
-        scheduler = create_scheduler(
-            max_batch_size=getattr(args, "max_batch_size", 2048),
-            target_memory_fraction=getattr(args, "target_gpu_memory_fraction", 0.8),
-            num_graph_workers=getattr(args, "num_graph_workers", "auto"),
-            graph_batch_size=int(getattr(args, "graph_batch_size", 1024)),
-            prefetch_batches=int(getattr(args, "prefetch_batches", 2)),
-            deterministic_representation=bool(getattr(args, "deterministic_representation", False)),
-        )
-
-        output_dir = Path(args.output_dir).expanduser().resolve()
+        process_config = process_screen_config_from_args(args)
+        output_dir = Path(process_config.output_dir).expanduser().resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        summary = await screen_path(
-            input_path=args.input_path,
-            output_dir=output_dir,
-            smiles_colname=getattr(args, "smiles_colname", "smiles"),
-            chem_id_colname=getattr(args, "chem_id_colname", "chem_id"),
-            archive_pattern=getattr(args, "archive_pattern", "*_scheme_b_unique_products.csv"),
-            archive_smiles_colname=getattr(args, "archive_smiles_colname", "product_smiles_canonical"),
-            archive_chem_id_colname=getattr(args, "archive_chem_id_colname", "example_combo_id"),
-            sqlite_table=getattr(args, "sqlite_table", None),
-            sqlite_query=getattr(args, "sqlite_query", None),
-            dedupe_smiles=bool(getattr(args, "dedupe_smiles", True)),
-            aggregate_scores=bool(getattr(args, "aggregate_scores", True)),
-            app_threshold=float(getattr(args, "app_threshold", 0.04374140128493309)),
-            min_nkill=int(getattr(args, "min_nkill", 10)),
-            chunk_size=int(getattr(args, "input_chunk_size", 10000)),
-            prefetch_queue_size=getattr(args, "prefetch_queue_size", "auto"),
-            grouping_mode=getattr(args, "grouping_mode", "auto"),
-            cpu_workers=getattr(args, "cpu_workers", "auto"),
-            target_rows_per_group=getattr(args, "target_rows_per_group", "auto"),
-            target_bytes_per_group=getattr(args, "target_bytes_per_group", "auto"),
-            scheduler=scheduler,
-            num_graph_workers=getattr(args, "num_graph_workers", "auto"),
-            graph_batch_size=int(getattr(args, "graph_batch_size", 1024)),
-            prefetch_batches=int(getattr(args, "prefetch_batches", 2)),
-            enable_profiling=bool(getattr(args, "profiling", False)),
-            prediction_row_budget=int(getattr(args, "prediction_row_budget", 8192)),
-        )
+        resolved_input_paths = [
+            str(Path(input_path).expanduser().resolve())
+            for input_path in process_config.input_paths
+        ]
 
-        manifest = {
-            "input_path": str(Path(args.input_path).expanduser().resolve()),
-            "output_dir": str(output_dir),
-            "dedupe_smiles": bool(args.dedupe_smiles),
-            "aggregate_scores": bool(args.aggregate_scores),
-            "app_threshold": float(args.app_threshold),
-            "min_nkill": int(args.min_nkill),
-            "input_chunk_size": int(getattr(args, "input_chunk_size", 10000)),
-            "normalized_rows": summary.normalized_rows,
-            "predicted_rows": summary.predicted_rows,
-            "normalized_input": str(summary.normalized_input_path),
-            "predictions_all": str(summary.predictions_all_path),
-            "grouped_outputs": summary.grouped_outputs,
-            "grouping_mode": summary.grouping_mode,
-            "cpu_workers_selected": summary.cpu_workers_selected,
-            "prefetch_queue_size_selected": summary.prefetch_queue_size_selected,
-            "work_unit_count": summary.work_unit_count,
-            "target_rows_per_group": summary.target_rows_per_group,
-            "target_bytes_per_group": summary.target_bytes_per_group,
-            "prediction_row_budget": int(getattr(args, "prediction_row_budget", 8192)),
-            "deterministic_representation": bool(getattr(args, "deterministic_representation", False)),
-            "classifier_backend": getattr(args, "classifier_backend", None) or os.environ.get("MOLE_CLASSIFIER_BACKEND", "auto"),
-            "profiling": summary.profiling,
-            "prediction_runtime": scheduler.runtime_snapshot(),
-        }
+        if process_config.execution_mode == "thread":
+            if len(process_config.input_paths) != 1:
+                raise ValueError(
+                    "screen thread mode currently supports exactly one --input-path; "
+                    "use --execution-mode process for multiple inputs"
+                )
+            screen_input_path = process_config.input_paths[0]
+            scheduler = create_scheduler(
+                max_batch_size=getattr(args, "max_batch_size", 2048),
+                target_memory_fraction=getattr(args, "target_gpu_memory_fraction", 0.8),
+                num_graph_workers=getattr(args, "num_graph_workers", "auto"),
+                graph_batch_size=int(getattr(args, "graph_batch_size", 1024)),
+                prefetch_batches=int(getattr(args, "prefetch_batches", 2)),
+                classifier_workers=getattr(args, "classifier_workers", "auto"),
+                classifier_inflight_batches=getattr(args, "classifier_inflight_batches", "auto"),
+                deterministic_representation=bool(getattr(args, "deterministic_representation", False)),
+            )
+
+            summary = await screen_path(
+                input_path=screen_input_path,
+                output_dir=output_dir,
+                smiles_colname=getattr(args, "smiles_colname", "smiles"),
+                chem_id_colname=getattr(args, "chem_id_colname", "chem_id"),
+                archive_pattern=getattr(args, "archive_pattern", "*_scheme_b_unique_products.csv"),
+                archive_smiles_colname=getattr(args, "archive_smiles_colname", "product_smiles_canonical"),
+                archive_chem_id_colname=getattr(args, "archive_chem_id_colname", "example_combo_id"),
+                sqlite_table=getattr(args, "sqlite_table", None),
+                sqlite_query=getattr(args, "sqlite_query", None),
+                dedupe_smiles=bool(getattr(args, "dedupe_smiles", True)),
+                aggregate_scores=bool(getattr(args, "aggregate_scores", True)),
+                app_threshold=float(getattr(args, "app_threshold", 0.04374140128493309)),
+                min_nkill=int(getattr(args, "min_nkill", 10)),
+                chunk_size=int(getattr(args, "input_chunk_size", 10000)),
+                prefetch_queue_size=getattr(args, "prefetch_queue_size", "auto"),
+                grouping_mode=getattr(args, "grouping_mode", "auto"),
+                cpu_workers=getattr(args, "cpu_workers", "auto"),
+                target_rows_per_group=getattr(args, "target_rows_per_group", "auto"),
+                target_bytes_per_group=getattr(args, "target_bytes_per_group", "auto"),
+                scheduler=scheduler,
+                num_graph_workers=getattr(args, "num_graph_workers", "auto"),
+                graph_batch_size=int(getattr(args, "graph_batch_size", 1024)),
+                prefetch_batches=int(getattr(args, "prefetch_batches", 2)),
+                classifier_workers=getattr(args, "classifier_workers", "auto"),
+                classifier_inflight_batches=getattr(args, "classifier_inflight_batches", "auto"),
+                enable_profiling=bool(getattr(args, "profiling", False)),
+                prediction_row_budget=int(getattr(args, "prediction_row_budget", 8192)),
+            )
+            manifest = {
+                "input_path": resolved_input_paths[0],
+                "input_paths": resolved_input_paths,
+                "output_dir": str(output_dir),
+                "execution_mode": process_config.execution_mode,
+                "producer_processes": process_config.producer_processes,
+                "predict_queue_max_batches": process_config.predict_queue_max_batches,
+                "result_queue_max_batches": process_config.result_queue_max_batches,
+                "batch_checkpoint_size": process_config.batch_checkpoint_size,
+                "dedupe_smiles": bool(args.dedupe_smiles),
+                "aggregate_scores": bool(args.aggregate_scores),
+                "app_threshold": float(args.app_threshold),
+                "min_nkill": int(args.min_nkill),
+                "input_chunk_size": int(getattr(args, "input_chunk_size", 10000)),
+                "normalized_rows": summary.normalized_rows,
+                "predicted_rows": summary.predicted_rows,
+                "normalized_input": str(summary.normalized_input_path),
+                "predictions_all": str(summary.predictions_all_path),
+                "grouped_outputs": summary.grouped_outputs,
+                "grouping_mode": summary.grouping_mode,
+                "cpu_workers_selected": summary.cpu_workers_selected,
+                "prefetch_queue_size_selected": summary.prefetch_queue_size_selected,
+                "work_unit_count": summary.work_unit_count,
+                "target_rows_per_group": summary.target_rows_per_group,
+                "target_bytes_per_group": summary.target_bytes_per_group,
+                "prediction_row_budget": int(getattr(args, "prediction_row_budget", 8192)),
+                "deterministic_representation": bool(getattr(args, "deterministic_representation", False)),
+                "classifier_backend": getattr(args, "classifier_backend", None) or os.environ.get("MOLE_CLASSIFIER_BACKEND", "auto"),
+                "profiling": summary.profiling,
+                "prediction_runtime": scheduler.runtime_snapshot(),
+            }
+        else:
+            process_summary = await screen_paths_multiprocess(
+                input_paths=process_config.input_paths,
+                output_dir=str(output_dir),
+                execution_mode=process_config.execution_mode,
+                producer_processes=process_config.producer_processes,
+                predict_queue_max_batches=process_config.predict_queue_max_batches,
+                result_queue_max_batches=process_config.result_queue_max_batches,
+                batch_checkpoint_size=process_config.batch_checkpoint_size,
+                rows_per_shard=process_config.rows_per_shard,
+                row_group_size=process_config.row_group_size,
+                smiles_colname=getattr(args, "smiles_colname", "smiles"),
+                chem_id_colname=getattr(args, "chem_id_colname", "chem_id"),
+                archive_smiles_colname=getattr(args, "archive_smiles_colname", "product_smiles_canonical"),
+                archive_chem_id_colname=getattr(args, "archive_chem_id_colname", "example_combo_id"),
+                grouping_mode=getattr(args, "grouping_mode", "source"),
+                cpu_workers=getattr(args, "cpu_workers", "auto"),
+                target_rows_per_group=getattr(args, "target_rows_per_group", "auto"),
+                target_bytes_per_group=getattr(args, "target_bytes_per_group", "auto"),
+                chunk_size=int(getattr(args, "input_chunk_size", 10000)),
+                aggregate_scores=bool(getattr(args, "aggregate_scores", True)),
+                app_threshold=float(getattr(args, "app_threshold", 0.04374140128493309)),
+                min_nkill=int(getattr(args, "min_nkill", 10)),
+                num_graph_workers=getattr(args, "num_graph_workers", "auto"),
+                graph_batch_size=int(getattr(args, "graph_batch_size", 1024)),
+                prefetch_batches=int(getattr(args, "prefetch_batches", 2)),
+                classifier_workers=getattr(args, "classifier_workers", "auto"),
+                classifier_inflight_batches=getattr(args, "classifier_inflight_batches", "auto"),
+                deterministic_representation=bool(getattr(args, "deterministic_representation", False)),
+                enable_profiling=bool(getattr(args, "profiling", False)),
+            )
+            manifest = {
+                "input_path": resolved_input_paths[0],
+                "input_paths": resolved_input_paths,
+                "output_dir": str(output_dir),
+                "execution_mode": process_config.execution_mode,
+                "producer_processes": process_config.producer_processes,
+                "predict_queue_max_batches": process_config.predict_queue_max_batches,
+                "result_queue_max_batches": process_config.result_queue_max_batches,
+                "batch_checkpoint_size": process_config.batch_checkpoint_size,
+                "rows_per_shard": process_config.rows_per_shard,
+                "row_group_size": process_config.row_group_size,
+                "dedupe_smiles": bool(args.dedupe_smiles),
+                "aggregate_scores": bool(args.aggregate_scores),
+                "app_threshold": float(args.app_threshold),
+                "min_nkill": int(args.min_nkill),
+                "input_chunk_size": int(getattr(args, "input_chunk_size", 10000)),
+                "prepared_manifest_path": process_summary["prepared_manifest_path"],
+                "prepared_manifest_paths": process_summary["prepared_manifest_paths"],
+                "prepared_input_paths": process_summary["prepared_input_paths"],
+                "batch_manifest_path": process_summary["batch_manifest_path"],
+                "run_state_path": process_summary["run_state_path"],
+                "hits_dir": process_summary["hits_dir"],
+                "source_groups": process_summary["source_groups"],
+                "work_unit_count": process_summary["work_unit_count"],
+                "prediction_row_budget": None,
+                "normalized_rows": None,
+                "predicted_rows": None,
+                "normalized_input": None,
+                "predictions_all": None,
+                "grouped_outputs": [],
+                "grouping_mode": getattr(args, "grouping_mode", "source"),
+                "cpu_workers_selected": None,
+                "prefetch_queue_size_selected": None,
+                "target_rows_per_group": getattr(args, "target_rows_per_group", "auto"),
+                "target_bytes_per_group": getattr(args, "target_bytes_per_group", "auto"),
+                "deterministic_representation": bool(getattr(args, "deterministic_representation", False)),
+                "classifier_backend": getattr(args, "classifier_backend", None) or os.environ.get("MOLE_CLASSIFIER_BACKEND", "auto"),
+                "profiling": None,
+                "prediction_runtime": process_summary.get("prediction_runtime"),
+                "runtime": process_summary["runtime"],
+            }
         (output_dir / "manifest.json").write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
@@ -636,6 +819,8 @@ def _command_stream_enumeration_screen(args: argparse.Namespace) -> int:
             num_graph_workers=getattr(args, "num_graph_workers", "auto"),
             graph_batch_size=int(getattr(args, "graph_batch_size", 1024)),
             prefetch_batches=int(getattr(args, "prefetch_batches", 2)),
+            classifier_workers=getattr(args, "classifier_workers", "auto"),
+            classifier_inflight_batches=getattr(args, "classifier_inflight_batches", "auto"),
             deterministic_representation=bool(getattr(args, "deterministic_representation", False)),
         )
         summary = await stream_enumeration_screen(
@@ -658,6 +843,10 @@ def _command_stream_enumeration_screen(args: argparse.Namespace) -> int:
             num_graph_workers=getattr(args, "num_graph_workers", "auto"),
             graph_batch_size=int(getattr(args, "graph_batch_size", 1024)),
             prefetch_batches=int(getattr(args, "prefetch_batches", 2)),
+            classifier_workers=getattr(args, "classifier_workers", "auto"),
+            classifier_inflight_batches=getattr(args, "classifier_inflight_batches", "auto"),
+            enumeration_workers=getattr(args, "enumeration_workers", "auto"),
+            enumeration_prefetch_batches=getattr(args, "enumeration_prefetch_batches", "auto"),
             deterministic_representation=bool(getattr(args, "deterministic_representation", False)),
             enable_profiling=bool(getattr(args, "profiling", False)),
         )

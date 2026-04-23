@@ -251,17 +251,28 @@ Batch-screen large molecule sets for antimicrobial activity.
 
 - requires `--input-path` and `--output-dir`
 - defaults to aggregate output, not per-strain output
-- writes run artifacts into the output directory:
+- defaults to `--execution-mode thread`
+- thread mode writes run artifacts into the output directory:
   - `normalized_input.tsv`
   - `predictions_all.tsv`
   - `by_source/<source_group>/predictions.tsv`
   - `manifest.json`
+- process mode first preprocesses repeated CSV/TSV-like `--input-path` values
+  into Parquet shards, then writes:
+  - `prepared_manifest.json`
+  - `prepared_manifests/<source_group>.json`
+  - `batch_manifest.jsonl`
+  - `run_state.json`
+  - `hits/...`
+  - `manifest.json`
+- process mode persists only broad-spectrum hit rows; it does not write
+  `predictions_all.tsv` for non-hit molecules
 - supports these input types:
-  - CSV / TSV files
+  - thread mode: CSV / TSV files
   - Parquet files
   - Parquet shard directories
-  - `tar` / `tar.gz` archives
-  - SQLite database files
+  - thread mode only: `tar` / `tar.gz` archives
+  - thread mode only: SQLite database files
 
 ### Parameters That Can Change Result Content
 
@@ -269,6 +280,7 @@ Batch-screen large molecule sets for antimicrobial activity.
 | --- | --- | --- | --- |
 | `--input-path` | required | Source CSV/TSV, Parquet file, Parquet directory, `tar` / `tar.gz`, or SQLite file | content |
 | `--output-dir` | required | Output directory for run artifacts | output |
+| `--execution-mode` | `thread` | `thread` for full normalized/predictions output; `process` for pre-sharded hit-only screening | content |
 | `--smiles-colname` | `smiles` | SMILES column name for tabular inputs | content |
 | `--chem-id-colname` | `chem_id` | chem_id column name for tabular inputs | content |
 | `--archive-pattern` | `*_scheme_b_unique_products.csv` | Archive member filename pattern for tar inputs | content |
@@ -289,6 +301,12 @@ Batch-screen large molecule sets for antimicrobial activity.
 | --- | --- | --- | --- |
 | `--grouping-mode` | `auto` | Work-unit planning mode: `auto`, `source`, `chunk`, `none` | performance |
 | `--cpu-workers` | `auto` | CPU preprocessing worker count | performance |
+| `--producer-processes` | `auto` | CPU producer process count in process mode | performance |
+| `--predict-queue-max-batches` | `auto` | Bound on queued ready-to-predict batches in process mode | performance |
+| `--result-queue-max-batches` | `auto` | Bound on queued predicted batches in process mode | performance |
+| `--batch-checkpoint-size` | `2048` | Rows committed per resumable process-mode batch | performance |
+| `--rows-per-shard` | `100000` | Rows written per prepared Parquet shard in process mode | performance |
+| `--row-group-size` | `4096` | Parquet row-group size used during process-mode preprocessing | performance |
 | `--target-rows-per-group` | `auto` | Planner row threshold | performance |
 | `--target-bytes-per-group` | `auto` | Planner byte threshold | performance |
 | `--input-chunk-size` / `--chunk-size` | `10000` | Rows read and emitted per normalized chunk | performance |
@@ -340,6 +358,25 @@ pixi run mole screen \
   --graph-batch-size 1024 \
   --prediction-row-budget 8192
 ```
+
+### Process-mode multi-input example
+
+```bash
+pixi run mole screen \
+  --input-path data/04.new_predictions/raw/tylosin.csv \
+  --input-path data/04.new_predictions/raw/tilmicosin.csv \
+  --output-dir data/04.new_predictions/runs/process_batch \
+  --execution-mode process \
+  --producer-processes auto \
+  --predict-queue-max-batches auto \
+  --result-queue-max-batches auto \
+  --batch-checkpoint-size 2048
+```
+
+Process mode is the operational path for multi-source hit-only screening on one
+GPU. It assumes aggregate output, writes batch-level resume metadata, and keeps
+only broad-spectrum hits on disk. See
+[docs/process_screening.md](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/process_screening.md).
 
 ## `mole stream-enumeration-screen`
 

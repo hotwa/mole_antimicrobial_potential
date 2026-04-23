@@ -89,6 +89,11 @@ The recommended deployment for multiple GPUs is manual: start multiple independe
 pin each one with `CUDA_VISIBLE_DEVICES` (e.g., `CUDA_VISIBLE_DEVICES=0 pixi run mole screen ...`).
 Same-GPU multi-processing is not recommended as it duplicates model weights.
 
+For large multi-source screening on a single GPU, `mole screen --execution-mode process`
+now uses one predictor process per GPU plus multiple CPU producer processes. In this mode,
+the CLI first preprocesses repeated `--input-path` CSV/TSV inputs into Parquet shards and
+then persists only broad-spectrum hits plus resumable batch manifests.
+
 ### Parameter Summary
 
 Commonly used command families and their tuning surface:
@@ -107,12 +112,15 @@ Commonly used command families and their tuning surface:
   - `--input-path`, `--output`
   - lightweight input-path inspection for comparing candidate screening sources
 - `mole screen`
-  - input selection/content: `--archive-pattern`,
+  - mode/content: `--execution-mode`, `--archive-pattern`,
     `--archive-smiles-colname`, `--archive-chem-id-colname`,
     `--sqlite-table`, `--sqlite-query`, `--no-dedupe-smiles`,
     `--aggregate-scores`, `--per-strain`, `--app-threshold`,
     `--min-nkill`
   - throughput/scheduling: `--grouping-mode`, `--cpu-workers`,
+    `--producer-processes`, `--predict-queue-max-batches`,
+    `--result-queue-max-batches`, `--batch-checkpoint-size`,
+    `--rows-per-shard`, `--row-group-size`,
     `--target-rows-per-group`, `--target-bytes-per-group`,
     `--input-chunk-size`, `--max-batch-size`,
     `--target-gpu-memory-fraction`, `--prefetch-queue-size`,
@@ -137,6 +145,7 @@ Detailed parameter semantics live in:
 
 - [docs/cli_reference.md](docs/cli_reference.md)
 - [docs/batch_screening_input_format.md](docs/batch_screening_input_format.md)
+- [docs/process_screening.md](docs/process_screening.md)
 - [docs/stream_enumeration_screen_runbook.md](docs/stream_enumeration_screen_runbook.md)
 - [docs/repo_layout.md](docs/repo_layout.md)
 - [data/04.new_predictions/README.md](data/04.new_predictions/README.md)
@@ -148,6 +157,7 @@ collapsed, which backend or model is used, or what output shape is emitted. They
 can therefore change result content:
 
 - `--classifier-backend`
+- `--execution-mode`
 - `--archive-pattern`
 - `--archive-smiles-colname`
 - `--archive-chem-id-colname`
@@ -171,6 +181,12 @@ semantic prediction path:
 - `--prefetch-batches`
 - `--grouping-mode`
 - `--cpu-workers`
+- `--producer-processes`
+- `--predict-queue-max-batches`
+- `--result-queue-max-batches`
+- `--batch-checkpoint-size`
+- `--rows-per-shard`
+- `--row-group-size`
 - `--target-rows-per-group`
 - `--target-bytes-per-group`
 - `--input-chunk-size`
@@ -256,6 +272,19 @@ pixi run mole screen \
   --graph-batch-size 1024 \
   --prediction-row-budget 8192 \
   --profiling
+
+# Or screen multiple CSV/TSV sources in process mode with hit-only persistence
+pixi run mole screen \
+  --input-path data/04.new_predictions/raw/tylosin.csv \
+  --input-path data/04.new_predictions/raw/tilmicosin.csv \
+  --output-dir data/04.new_predictions/runs/process_batch \
+  --execution-mode process \
+  --classifier-backend pickle \
+  --producer-processes auto \
+  --batch-checkpoint-size 2048
+
+# Process mode writes prepared manifests, batch_manifest.jsonl, run_state.json, and hits/...
+# It does not write predictions_all.tsv for non-hit molecules.
 
 # Stream scaffold/fragment combinations directly and persist only broad-spectrum hits
 pixi run mole stream-enumeration-screen \

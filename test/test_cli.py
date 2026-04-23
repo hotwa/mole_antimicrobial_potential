@@ -39,6 +39,10 @@ class MoleCliTestCase(unittest.TestCase):
                 "128",
                 "--prefetch-batches",
                 "4",
+                "--classifier-workers",
+                "2",
+                "--classifier-inflight-batches",
+                "5",
                 "--deterministic-representation",
                 "--classifier-backend",
                 "pickle",
@@ -47,6 +51,8 @@ class MoleCliTestCase(unittest.TestCase):
         self.assertEqual(args.num_graph_workers, "3")
         self.assertEqual(args.graph_batch_size, 128)
         self.assertEqual(args.prefetch_batches, 4)
+        self.assertEqual(args.classifier_workers, "2")
+        self.assertEqual(args.classifier_inflight_batches, "5")
         self.assertTrue(args.deterministic_representation)
         self.assertEqual(args.classifier_backend, "pickle")
 
@@ -63,6 +69,238 @@ class MoleCliTestCase(unittest.TestCase):
             ["screen", "--input-path", "x.tsv", "--output-dir", "out", "--prediction-row-budget", "8192"]
         )
         self.assertEqual(args.prediction_row_budget, 8192)
+
+    def test_screen_parser_accepts_repeated_input_paths(self):
+        parser = mole_cli._build_parser()
+        args = parser.parse_args(
+            [
+                "screen",
+                "--input-path",
+                "a.csv",
+                "--input-path",
+                "b.csv",
+                "--output-dir",
+                "out",
+                "--execution-mode",
+                "process",
+            ]
+        )
+
+        self.assertEqual(args.input_path, ["a.csv", "b.csv"])
+        self.assertEqual(args.execution_mode, "process")
+
+    def test_screen_parser_accepts_process_tuning_flags(self):
+        parser = mole_cli._build_parser()
+        args = parser.parse_args(
+            [
+                "screen",
+                "--input-path",
+                "a.csv",
+                "--output-dir",
+                "out",
+                "--execution-mode",
+                "process",
+                "--producer-processes",
+                "auto",
+                "--predict-queue-max-batches",
+                "auto",
+                "--result-queue-max-batches",
+                "8",
+                "--batch-checkpoint-size",
+                "2048",
+            ]
+        )
+
+        self.assertEqual(args.producer_processes, "auto")
+        self.assertEqual(args.predict_queue_max_batches, "auto")
+        self.assertEqual(args.result_queue_max_batches, "8")
+        self.assertEqual(args.batch_checkpoint_size, 2048)
+
+    def test_screen_process_config_tracks_multi_input_and_process_flags(self):
+        from src.screening_process_pipeline import process_screen_config_from_args
+
+        parser = mole_cli._build_parser()
+        args = parser.parse_args(
+            [
+                "screen",
+                "--input-path",
+                "a.csv",
+                "--input-path",
+                "b.csv",
+                "--output-dir",
+                "out",
+                "--execution-mode",
+                "process",
+                "--producer-processes",
+                "3",
+                "--predict-queue-max-batches",
+                "auto",
+                "--result-queue-max-batches",
+                "8",
+                "--batch-checkpoint-size",
+                "4096",
+            ]
+        )
+
+        config = process_screen_config_from_args(args)
+
+        self.assertEqual(config.input_paths, ["a.csv", "b.csv"])
+        self.assertEqual(config.output_dir, "out")
+        self.assertEqual(config.execution_mode, "process")
+        self.assertEqual(config.producer_processes, "3")
+        self.assertEqual(config.predict_queue_max_batches, "auto")
+        self.assertEqual(config.result_queue_max_batches, "8")
+        self.assertEqual(config.batch_checkpoint_size, 4096)
+
+    def test_screen_process_config_wraps_scalar_string_input_path(self):
+        from src.screening_process_pipeline import process_screen_config_from_args
+
+        args = SimpleNamespace(
+            input_path="/tmp/input.csv",
+            output_dir="out",
+            execution_mode="process",
+        )
+
+        config = process_screen_config_from_args(args)
+
+        self.assertEqual(config.input_paths, ["/tmp/input.csv"])
+
+    def test_command_screen_rejects_multi_input_in_thread_mode(self):
+        parser = mole_cli._build_parser()
+        args = parser.parse_args(
+            [
+                "screen",
+                "--input-path",
+                "a.csv",
+                "--input-path",
+                "b.csv",
+                "--output-dir",
+                "out",
+            ]
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "screen thread mode currently supports exactly one --input-path; use --execution-mode process for multiple inputs",
+        ):
+            mole_cli._command_screen(args)
+
+    def test_command_screen_thread_mode_does_not_forward_process_config_kw(self):
+        parser = mole_cli._build_parser()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "input.tsv"
+            output_dir = tmp / "out"
+            input_path.write_text("smiles\tchem_id\nCCO\tmol1\n", encoding="utf-8")
+            args = parser.parse_args(
+                [
+                    "screen",
+                    "--input-path",
+                    str(input_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--classifier-workers",
+                    "2",
+                    "--classifier-inflight-batches",
+                    "5",
+                ]
+            )
+            summary = SimpleNamespace(
+                normalized_rows=1,
+                predicted_rows=1,
+                normalized_input_path=output_dir / "normalized_input.tsv",
+                predictions_all_path=output_dir / "predictions_all.tsv",
+                grouped_outputs=[],
+                grouping_mode="auto",
+                cpu_workers_selected=1,
+                prefetch_queue_size_selected=4,
+                work_unit_count=1,
+                target_rows_per_group=100000,
+                target_bytes_per_group=50000000,
+                profiling=None,
+            )
+            fake_scheduler = SimpleNamespace(runtime_snapshot=mock.Mock(return_value={"used_cuda": False}))
+
+            async def fake_screen_path(**kwargs):
+                self.assertNotIn("process_config", kwargs)
+                self.assertEqual(kwargs["input_path"], str(input_path))
+                self.assertEqual(kwargs["classifier_workers"], "2")
+                self.assertEqual(kwargs["classifier_inflight_batches"], "5")
+                return summary
+
+            with mock.patch.object(mole_cli, "create_scheduler", return_value=fake_scheduler) as create_scheduler_mock, mock.patch.object(
+                mole_cli, "screen_path", side_effect=fake_screen_path
+            ), mock.patch.object(mole_cli, "_dump_json"):
+                self.assertEqual(mole_cli._command_screen(args), 0)
+            _, scheduler_kwargs = create_scheduler_mock.call_args
+            self.assertEqual(scheduler_kwargs["classifier_workers"], "2")
+            self.assertEqual(scheduler_kwargs["classifier_inflight_batches"], "5")
+
+    def test_screen_command_routes_process_mode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            input_path = tmp / "a.csv"
+            output_dir = tmp / "out"
+            input_path.write_text("smiles,chem_id\nCCO,m1\n", encoding="utf-8")
+
+            process_summary = {
+                "execution_mode": "process",
+                "prepared_manifest_path": str(output_dir / "prepared_manifest.json"),
+                "prepared_manifest_paths": [],
+                "batch_manifest_path": str(output_dir / "batch_manifest.jsonl"),
+                "run_state_path": str(output_dir / "run_state.json"),
+                "hits_dir": str(output_dir / "hits"),
+                "input_paths": [str(input_path.resolve())],
+                "prepared_input_paths": [],
+                "source_groups": ["a"],
+                "work_unit_count": 1,
+                "runtime": {
+                    "predictor_processes": 1,
+                    "producer_processes": 2,
+                    "predict_queue_max_batches": 8,
+                    "result_queue_max_batches": 8,
+                    "batch_checkpoint_size": 2048,
+                    "graph_workers": 0,
+                },
+                "prediction_runtime": None,
+            }
+
+            async def fake_screen_paths_multiprocess(**kwargs):
+                self.assertEqual(kwargs["input_paths"], [str(input_path)])
+                self.assertEqual(kwargs["output_dir"], str(output_dir))
+                self.assertEqual(kwargs["execution_mode"], "process")
+                self.assertEqual(kwargs["classifier_workers"], "3")
+                self.assertEqual(kwargs["classifier_inflight_batches"], "6")
+                return process_summary
+
+            with mock.patch.object(
+                mole_cli,
+                "screen_paths_multiprocess",
+                side_effect=fake_screen_paths_multiprocess,
+                create=True,
+            ) as process_mock, mock.patch.object(
+                mole_cli,
+                "create_scheduler",
+                side_effect=AssertionError("thread scheduler should not be created in process mode"),
+            ), mock.patch.object(mole_cli, "_dump_json"):
+                rc = mole_cli.main(
+                    [
+                        "screen",
+                        "--input-path",
+                        str(input_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--execution-mode",
+                        "process",
+                        "--classifier-workers",
+                        "3",
+                        "--classifier-inflight-batches",
+                        "6",
+                    ]
+                )
+
+            self.assertEqual(rc, 0)
+            process_mock.assert_called_once()
 
     def test_doctor_reports_ok_when_fake_probe_is_available(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -210,22 +448,84 @@ class MoleCliTestCase(unittest.TestCase):
             num_graph_workers="3",
             graph_batch_size=128,
             prefetch_batches=4,
+            classifier_workers="2",
+            classifier_inflight_batches="5",
             deterministic_representation=True,
             classifier_backend="pickle",
+            profiling=False,
         )
 
-        with mock.patch.object(mole_cli, "get_scheduler", return_value=fake_scheduler), mock.patch.dict(
+        with mock.patch.object(mole_cli, "get_scheduler", return_value=fake_scheduler) as get_scheduler_mock, mock.patch.dict(
             mole_cli.os.environ, {}, clear=False
         ):
             payload = mole_cli.asyncio_run(mole_cli._predict_async(args))
             self.assertEqual(mole_cli.os.environ["MOLE_CLASSIFIER_BACKEND"], "pickle")
 
+        _, scheduler_kwargs = get_scheduler_mock.call_args
+        self.assertEqual(scheduler_kwargs["classifier_workers"], "2")
+        self.assertEqual(scheduler_kwargs["classifier_inflight_batches"], "5")
         _, kwargs = fake_scheduler.predict_molecules.call_args
         self.assertEqual(kwargs["num_graph_workers"], "3")
         self.assertEqual(kwargs["graph_batch_size"], 128)
         self.assertEqual(kwargs["prefetch_batches"], 4)
+        self.assertEqual(kwargs["classifier_workers"], "2")
+        self.assertEqual(kwargs["classifier_inflight_batches"], "5")
         self.assertTrue(kwargs["deterministic_representation"])
         self.assertEqual(payload["items"], [{"chem_id": "mol1", "apscore_total": -1.2}])
+
+    def test_command_stream_enumeration_screen_threads_classifier_stage_settings(self):
+        args = SimpleNamespace(
+            output_dir="/tmp/out",
+            scaffold_file="/tmp/scaffold.smi",
+            scaffold_dir=None,
+            scaffold_catalog=None,
+            ordinary_library="/tmp/ordinary.csv",
+            pos13_library="/tmp/pos13.csv",
+            run_state_source=None,
+            chunk_manifest_source=None,
+            start_index=0,
+            stop_index=10,
+            shard_size=5,
+            prediction_batch_size=2,
+            classifier_backend="pickle",
+            app_threshold=0.04374140128493309,
+            min_nkill=10,
+            num_graph_workers="3",
+            graph_batch_size=128,
+            prefetch_batches=4,
+            classifier_workers="2",
+            classifier_inflight_batches="5",
+            enumeration_workers="auto",
+            enumeration_prefetch_batches="auto",
+            deterministic_representation=True,
+            profiling=False,
+        )
+        fake_scheduler = SimpleNamespace(runtime_snapshot=mock.Mock(return_value={"device": "cuda:0"}))
+        fake_summary = SimpleNamespace(
+            output_dir=Path("/tmp/out"),
+            run_state_path=Path("/tmp/out/run_state.json"),
+            shard_manifest_path=Path("/tmp/out/shard_manifest.jsonl"),
+            attempted_count=10,
+            hit_count=3,
+            completed_shards=2,
+            start_index=0,
+            stop_index=10,
+            total_combinations=100,
+        )
+
+        async def fake_stream_enumeration_screen(**kwargs):
+            self.assertEqual(kwargs["classifier_workers"], "2")
+            self.assertEqual(kwargs["classifier_inflight_batches"], "5")
+            return fake_summary
+
+        with mock.patch.object(mole_cli, "create_scheduler", return_value=fake_scheduler) as create_scheduler_mock, mock.patch.object(
+            mole_cli, "stream_enumeration_screen", side_effect=fake_stream_enumeration_screen
+        ), mock.patch.object(mole_cli, "_dump_json"):
+            self.assertEqual(mole_cli._command_stream_enumeration_screen(args), 0)
+
+        _, scheduler_kwargs = create_scheduler_mock.call_args
+        self.assertEqual(scheduler_kwargs["classifier_workers"], "2")
+        self.assertEqual(scheduler_kwargs["classifier_inflight_batches"], "5")
 
 
 if __name__ == "__main__":  # pragma: no cover

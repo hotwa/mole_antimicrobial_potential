@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
+import time
 import unittest
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -60,6 +64,57 @@ class _InterruptingScheduler:
         return {"backend": "fake"}
 
 
+class _FakeMaterializationExecutor:
+    def __init__(
+        self,
+        *,
+        max_workers=None,
+        space,
+        scaffolds,
+        ordinary_fragments,
+        pos13_fragments,
+        delay_by_start: dict[int, float] | None = None,
+        on_batch_complete=None,
+    ) -> None:
+        self._space = space
+        self._scaffolds = scaffolds
+        self._ordinary_fragments = ordinary_fragments
+        self._pos13_fragments = pos13_fragments
+        self._delay_by_start = delay_by_start or {}
+        self._on_batch_complete = on_batch_complete
+        self._threads: list[threading.Thread] = []
+
+    def submit_materialize_batch(self, *, batch_start: int, batch_end: int) -> Future:
+        future: Future = Future()
+
+        def _run() -> None:
+            try:
+                time.sleep(self._delay_by_start.get(batch_start, 0.0))
+                rows = stream_module._materialize_batch(
+                    start_idx=batch_start,
+                    end_idx=batch_end,
+                    space=self._space,
+                    scaffolds=self._scaffolds,
+                    ordinary_fragments=self._ordinary_fragments,
+                    pos13_fragments=self._pos13_fragments,
+                )
+                if self._on_batch_complete is not None:
+                    self._on_batch_complete(batch_start=batch_start, batch_end=batch_end, rows=rows)
+                future.set_result(rows)
+            except BaseException as exc:  # pragma: no cover
+                future.set_exception(exc)
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        self._threads.append(thread)
+        return future
+
+    def shutdown(self, *, wait: bool, cancel_futures: bool) -> None:
+        if wait:
+            for thread in self._threads:
+                thread.join(timeout=1.0)
+
+
 class StreamEnumerationRunTests(unittest.IsolatedAsyncioTestCase):
     def _write_inputs(self, root: Path) -> dict[str, Path]:
         scaffold = root / "scaffold.smi"
@@ -99,6 +154,9 @@ class StreamEnumerationRunTests(unittest.IsolatedAsyncioTestCase):
             return pd.DataFrame()
         return pd.concat([pd.read_parquet(path) for path in files], ignore_index=True)
 
+    def _read_run_state(self, output_dir: Path) -> dict:
+        return json.loads((output_dir / "run_state.json").read_text(encoding="utf-8"))
+
     async def _run_stream_screen(
         self,
         *,
@@ -107,6 +165,10 @@ class StreamEnumerationRunTests(unittest.IsolatedAsyncioTestCase):
         stop_index: int,
         fail_after_shards: int | None = None,
         scheduler_override=None,
+        enumeration_workers: int | str = 2,
+        enumeration_prefetch_batches: int | str = 2,
+        prediction_batch_size: int = 2,
+        shard_size: int = 2,
     ):
         scheduler = scheduler_override or _FakeScheduler(hit_indexes)
         inputs = self._write_inputs(output_dir.parent)
@@ -121,11 +183,13 @@ class StreamEnumerationRunTests(unittest.IsolatedAsyncioTestCase):
             chunk_manifest_source=None,
             start_index=0,
             stop_index=stop_index,
-            shard_size=2,
-            prediction_batch_size=2,
+            shard_size=shard_size,
+            prediction_batch_size=prediction_batch_size,
             scheduler=scheduler,
             fail_after_shards=fail_after_shards,
             classifier_backend="pickle",
+            enumeration_workers=enumeration_workers,
+            enumeration_prefetch_batches=enumeration_prefetch_batches,
         )
 
     async def test_hits_only_persistence(self) -> None:
@@ -201,6 +265,151 @@ class StreamEnumerationRunTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("shard_id", row)
             self.assertIn("scaffold_slug", row)
 
+    async def test_enumeration_prefetches_multiple_batches_while_prediction_waits(self) -> None:
+        class DelayedScheduler:
+            def __init__(self) -> None:
+                self.predict_started = threading.Event()
+                self.release_prediction = threading.Event()
+                self.materialized_batches = 0
+                self.max_materialized_while_predicting = 0
+
+            async def predict_molecules(self, molecules, **kwargs):
+                self.predict_started.set()
+                deadline = time.monotonic() + 1.5
+                while time.monotonic() < deadline:
+                    self.max_materialized_while_predicting = max(
+                        self.max_materialized_while_predicting,
+                        self.materialized_batches,
+                    )
+                    if self.materialized_batches >= 2:
+                        break
+                    await stream_module.asyncio.sleep(0.01)
+                self.release_prediction.set()
+                return [
+                    {
+                        "chem_id": molecule.chem_id,
+                        "broad_spectrum": 0,
+                        "ginhib_total": 0,
+                        "apscore_total": 0.0,
+                    }
+                    for molecule in molecules
+                ]
+
+            def runtime_snapshot(self):
+                return {"backend": "fake"}
+
+        scheduler = DelayedScheduler()
+
+        def fake_executor_factory(**kwargs):
+            return _FakeMaterializationExecutor(
+                **kwargs,
+                delay_by_start={0: 0.02, 1: 0.02, 2: 0.02, 3: 0.02},
+                on_batch_complete=lambda **_: _record_materialized_batch(),
+            )
+
+        def _record_materialized_batch() -> None:
+            scheduler.materialized_batches += 1
+            if scheduler.predict_started.is_set() and not scheduler.release_prediction.is_set():
+                scheduler.max_materialized_while_predicting = max(
+                    scheduler.max_materialized_while_predicting,
+                    scheduler.materialized_batches,
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            stream_module,
+            "_create_materialization_executor",
+            side_effect=fake_executor_factory,
+        ):
+            output_dir = Path(tmpdir) / "run"
+            inputs = self._write_inputs(Path(tmpdir))
+            await stream_module.stream_enumeration_screen(
+                output_dir=output_dir,
+                scaffold_file=inputs["scaffold"],
+                scaffold_dir=None,
+                scaffold_catalog=None,
+                ordinary_library=inputs["ordinary"],
+                pos13_library=inputs["pos13"],
+                start_index=0,
+                stop_index=4,
+                shard_size=4,
+                prediction_batch_size=1,
+                scheduler=scheduler,
+                classifier_backend="pickle",
+                enumeration_workers=2,
+                enumeration_prefetch_batches=2,
+            )
+
+        self.assertGreaterEqual(scheduler.max_materialized_while_predicting, 2)
+
+    async def test_enumeration_prefetch_respects_bound_and_preserves_order(self) -> None:
+        scheduler = _FakeScheduler(set())
+        def fake_executor_factory(**kwargs):
+            return _FakeMaterializationExecutor(
+                **kwargs,
+                delay_by_start={0: 0.05, 1: 0.01, 2: 0.01, 3: 0.01},
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            stream_module,
+            "_create_materialization_executor",
+            side_effect=fake_executor_factory,
+        ):
+            output_dir = Path(tmpdir) / "run"
+            inputs = self._write_inputs(Path(tmpdir))
+            await stream_module.stream_enumeration_screen(
+                output_dir=output_dir,
+                scaffold_file=inputs["scaffold"],
+                scaffold_dir=None,
+                scaffold_catalog=None,
+                ordinary_library=inputs["ordinary"],
+                pos13_library=inputs["pos13"],
+                start_index=0,
+                stop_index=4,
+                shard_size=4,
+                prediction_batch_size=1,
+                scheduler=scheduler,
+                classifier_backend="pickle",
+                enumeration_workers=2,
+                enumeration_prefetch_batches=2,
+            )
+
+            run_state = self._read_run_state(output_dir)
+            self.assertLessEqual(run_state["runtime"]["max_pending_materialized_batches"], 2)
+            self.assertEqual(
+                [call[0] for call in scheduler.calls],
+                ["scaffold__g0", "scaffold__g1", "scaffold__g2", "scaffold__g3"],
+            )
+
+    async def test_run_state_tracks_runtime_progress_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "run"
+            await self._run_stream_screen(output_dir=output_dir, hit_indexes={1, 3}, stop_index=4)
+            run_state = self._read_run_state(output_dir)
+            runtime = run_state["runtime"]
+            self.assertEqual(runtime["attempted_count"], 4)
+            self.assertEqual(runtime["hit_count"], 2)
+            self.assertIn("pending_materialized_batches", runtime)
+            self.assertIn("prefetch_depth", runtime)
+            self.assertIn("scheduler", runtime)
+
+    async def test_auto_enumeration_settings_use_process_materializer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir) / "run"
+            await self._run_stream_screen(
+                output_dir=output_dir,
+                hit_indexes={0},
+                stop_index=2,
+                enumeration_workers="auto",
+                enumeration_prefetch_batches="auto",
+                prediction_batch_size=1,
+                shard_size=2,
+            )
+            run_state = self._read_run_state(output_dir)
+            runtime = run_state["runtime"]
+            self.assertEqual(runtime["materialization_mode"], "process")
+            self.assertGreaterEqual(runtime["resolved_enumeration_workers"], 1)
+            self.assertGreaterEqual(runtime["prefetch_depth"]["configured"], 1)
+
 
 class StreamEnumerationCliTests(unittest.TestCase):
     def test_parser_exposes_stream_enumeration_screen_subcommand(self) -> None:
@@ -218,6 +427,32 @@ class StreamEnumerationCliTests(unittest.TestCase):
         )
         self.assertEqual(args.command, "stream-enumeration-screen")
         self.assertEqual(args.output_dir, "out")
+
+    def test_parser_accepts_enumeration_tuning_flags(self) -> None:
+        parser = mole_cli._build_parser()
+        args = parser.parse_args(
+            [
+                "stream-enumeration-screen",
+                "--output-dir",
+                "out",
+                "--ordinary-library",
+                "ordinary.csv",
+                "--pos13-library",
+                "pos13.csv",
+                "--enumeration-workers",
+                "3",
+                "--enumeration-prefetch-batches",
+                "4",
+                "--classifier-workers",
+                "2",
+                "--classifier-inflight-batches",
+                "5",
+            ]
+        )
+        self.assertEqual(args.enumeration_workers, "3")
+        self.assertEqual(args.enumeration_prefetch_batches, "4")
+        self.assertEqual(args.classifier_workers, "2")
+        self.assertEqual(args.classifier_inflight_batches, "5")
 
 
 if __name__ == "__main__":  # pragma: no cover

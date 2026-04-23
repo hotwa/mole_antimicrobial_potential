@@ -62,6 +62,7 @@ For batch-screening input preparation guidance, read:
 
 - [docs/cli_reference.md](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/cli_reference.md)
 - [docs/batch_screening_input_format.md](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/batch_screening_input_format.md)
+- [docs/process_screening.md](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/process_screening.md)
 - [docs/stream_enumeration_screen_runbook.md](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/stream_enumeration_screen_runbook.md)
 
 The batch input guide explains why raw `tar.gz` bundles and one huge CSV are
@@ -163,6 +164,11 @@ index first.
   - consumes `--no-dedupe-smiles`, `--aggregate-scores` / `--per-strain`,
     `--prefetch-queue-size`, `--prediction-row-budget`, output writing, and
     manifest runtime fields
+- [`src/screening_process_pipeline.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/screening_process_pipeline.py)
+  - owns `mole screen --execution-mode process`
+  - preprocesses repeated input paths into Parquet shards, plans producer work,
+    launches producer/predictor/writer processes, and persists hit-only batch
+    checkpoints
 - [`src/stream_enumeration_screen.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/stream_enumeration_screen.py)
   - owns deterministic index mapping, scaffold/fragment loading, shard
     checkpointing, hit-only parquet writes, and resume/idempotency behavior for
@@ -172,6 +178,8 @@ index first.
   - consumes `--input-path`, `--output-dir`, `--smiles-colname`,
     `--chem-id-colname`, `--source-group`, `--rows-per-shard`,
     `--row-group-size`
+  - also provides the multi-input pre-sharding helper used by process-mode
+    screening
 - [`src/classifier_backend.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/classifier_backend.py)
   - owns backend discovery and backend-specific model paths
   - reads `MOLE_CLASSIFIER_BACKEND`, `MOLE_PICKLE_MODEL_PATH`,
@@ -250,8 +258,10 @@ separated:
   - these should not be mixed with canonical long-running screening outputs
 - `runs/<run_id>/`
   - canonical screening outputs intended for downstream consumption
-  - examples: `manifest.json`, `normalized_input.tsv`,
+  - thread-mode examples: `manifest.json`, `normalized_input.tsv`,
     `predictions_all.tsv`, `by_source/...`
+  - process-mode examples: `manifest.json`, `prepared_manifest.json`,
+    `prepared_manifests/`, `batch_manifest.jsonl`, `run_state.json`, `hits/...`
 
 When reorganizing an old batch directory, prefer moving temporary extraction,
 probe runs, and copied staging assets into `cache/` or `benchmarks/` instead of
