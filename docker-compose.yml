@@ -82,7 +82,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
       mole_api_0:
         condition: service_healthy

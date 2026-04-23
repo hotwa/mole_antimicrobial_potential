@@ -49,7 +49,45 @@ REINVENT4 LibInvent 的运行脚本和模板见
 
 如果你需要查找“功能 -> Python 文件 -> 推荐用法”的映射，请看：
 
+- [docs/cli_reference.md](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/cli_reference.md)
 - [docs/repo_layout.md](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/repo_layout.md)
+- [docs/batch_screening_input_format.md](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/batch_screening_input_format.md)
+
+### API 与 CLI 调优参数的关系
+
+FastAPI `/predict` 和 `/score` 不暴露 `mole predict` / `mole screen` 的 CLI
+调优参数，比如：
+
+- `--num-graph-workers`
+- `--graph-batch-size`
+- `--prefetch-batches`
+- `--classifier-backend`
+- `--max-batch-size`
+- `--target-gpu-memory-fraction`
+- `--profiling`
+
+这些参数由服务启动时的运行环境和共享 service/scheduler 配置决定。
+也就是说，API 请求体不会逐次覆盖这些 CLI tuning knobs，但服务会继承：
+
+- `MOLE_CLASSIFIER_BACKEND`
+- `MOLE_MOLE_MODEL_PATH`
+- `MOLE_PICKLE_MODEL_PATH`
+- `MOLE_TIMBER_MODEL_DIR`
+- `CUDA_VISIBLE_DEVICES`
+
+安装层面的 CUDA wheel 选择仍由以下环境变量控制：
+
+- `MOLE_TORCH_VERSION`
+- `MOLE_TORCH_CUDA_TAG`
+- `MOLE_TORCH_INDEX_URL`
+
+如果你需要完整的参数解释、哪些参数会影响结果内容、哪些只影响性能/调度，
+请以 [README.md](/home/lingyuzeng/project/mole_antimicrobial_potential/README.md)
+和
+[docs/cli_reference.md](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/cli_reference.md)
+、
+[docs/batch_screening_input_format.md](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/batch_screening_input_format.md)
+为准。
 
 ---
 
@@ -118,7 +156,7 @@ python test/test_api_request.py
 
 ## 5. 说明
 
-- 该接口与 MCP 服务共享同一个 predictor 单例，避免重复加载模型。
+- 该接口与 MCP 服务共享同一个 predictor 和 adaptive batching scheduler 单例，避免重复加载模型，并在后台自动进行 OOM 降级重试。
 - 旧的 `/mcp` SSE 接口已废弃，建议使用 MCP JSON-RPC 或该 FastAPI 接口。
 - 对 REINVENT4，推荐调用 `/score` 而不是直接拿 `apscore_*` 做 RL reward。
 - 如果 `site_reward.enabled=true`，则 `/score` 请求里的 `objective.site_reward`

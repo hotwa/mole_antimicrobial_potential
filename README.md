@@ -28,7 +28,8 @@ graph LR
 
 ## Multi-GPU Configuration
 
-Each API container is bound to a specific GPU via `GPU_IDS` environment variable:
+For the legacy container deployment path, each API container can be bound to a
+specific GPU via `GPU_IDS`:
 
 | Container | GPU | Port |
 |-----------|-----|------|
@@ -37,7 +38,11 @@ Each API container is bound to a specific GPU via `GPU_IDS` environment variable
 | mole_lb | - | 8080 (nginx) |
 | mole_mcp | GPU 0 | 8001 |
 
-## Configuration & Performance Tuning
+## Legacy Container Tuning
+
+The variables in this section apply to the older container-oriented API launch
+path. They are not the primary tuning knobs for `pixi run mole predict` or
+`pixi run mole screen`, which are documented in the CLI sections below.
 
 - **`MODEL_LOAD_MODE`**
   - `resident` (Default): Models load once at startup and stay in VRAM. Fast inference (milliseconds) but higher constant VRAM usage.
@@ -70,8 +75,129 @@ curl localhost:8001/health
 ## Pixi CLI
 
 The repository now also ships a unified `mole` CLI for local workflows and agents.
-It uses the same predictor singleton as the HTTP servers and can run with `pixi`
-on a fresh machine.
+It uses the same predictor and single-GPU adaptive scheduler singleton as the HTTP
+servers and can run with `pixi` on a fresh machine.
+
+### Performance and Multi-GPU Guidance
+A single `mole screen` or `api_server.py` instance uses one GPU consumer mapped to
+multiple dynamically allocated CPU worker processes or threads to parse, chunk, and
+normalize large tabular buffers and Tar/SQLite files seamlessly. Batch sizes are
+automatically tuned based on available VRAM to keep the GPU busy. Grouping and chunking
+split size are also dynamically estimated based on hardware capabilities rather than static numbers.
+
+The recommended deployment for multiple GPUs is manual: start multiple independent processes and
+pin each one with `CUDA_VISIBLE_DEVICES` (e.g., `CUDA_VISIBLE_DEVICES=0 pixi run mole screen ...`).
+Same-GPU multi-processing is not recommended as it duplicates model weights.
+
+### Parameter Summary
+
+Commonly used command families and their tuning surface:
+
+- `mole doctor`
+  - validation only: `--strict-gpu`, `--env-file`, `--scaffold-file`,
+    `--objective-file`
+  - use it to validate CUDA, model files, and REINVENT4 assets before a run
+- `mole predict`
+  - result/content: `--classifier-backend`, `--aggregate-scores`,
+    `--app-threshold`, `--min-nkill`
+  - performance/reproducibility: `--num-graph-workers`,
+    `--graph-batch-size`, `--prefetch-batches`, `--profiling`,
+    `--deterministic-representation`
+- `mole benchmark-screening-inputs`
+  - `--input-path`, `--output`
+  - lightweight input-path inspection for comparing candidate screening sources
+- `mole screen`
+  - input selection/content: `--archive-pattern`,
+    `--archive-smiles-colname`, `--archive-chem-id-colname`,
+    `--sqlite-table`, `--sqlite-query`, `--no-dedupe-smiles`,
+    `--aggregate-scores`, `--per-strain`, `--app-threshold`,
+    `--min-nkill`
+  - throughput/scheduling: `--grouping-mode`, `--cpu-workers`,
+    `--target-rows-per-group`, `--target-bytes-per-group`,
+    `--input-chunk-size`, `--max-batch-size`,
+    `--target-gpu-memory-fraction`, `--prefetch-queue-size`,
+    `--prediction-row-budget`, `--num-graph-workers`,
+    `--graph-batch-size`, `--prefetch-batches`, `--profiling`,
+    `--deterministic-representation`
+- `mole preprocess-screening-input`
+  - `--input-path`, `--output-dir`, `--smiles-colname`,
+    `--chem-id-colname`, `--source-group`, `--rows-per-shard`,
+    `--row-group-size`, `--output`
+
+Detailed parameter semantics live in:
+
+- [docs/cli_reference.md](docs/cli_reference.md)
+- [docs/batch_screening_input_format.md](docs/batch_screening_input_format.md)
+- [docs/repo_layout.md](docs/repo_layout.md)
+- [data/04.new_predictions/README.md](data/04.new_predictions/README.md)
+
+### Result vs. Performance Knobs
+
+These settings can change which molecules are loaded, how duplicates are
+collapsed, which backend or model is used, or what output shape is emitted. They
+can therefore change result content:
+
+- `--classifier-backend`
+- `--archive-pattern`
+- `--archive-smiles-colname`
+- `--archive-chem-id-colname`
+- `--sqlite-table`
+- `--sqlite-query`
+- `--no-dedupe-smiles`
+- `--aggregate-scores` / `--per-strain`
+- `--app-threshold`
+- `--min-nkill`
+- `MOLE_CLASSIFIER_BACKEND`
+- `MOLE_MOLE_MODEL_PATH`
+- `MOLE_PICKLE_MODEL_PATH`
+- `MOLE_TIMBER_MODEL_DIR`
+
+These settings are intended to change throughput, memory pressure, scheduling,
+or device placement. For a fixed model/backend they should not change the
+semantic prediction path:
+
+- `--num-graph-workers`
+- `--graph-batch-size`
+- `--prefetch-batches`
+- `--grouping-mode`
+- `--cpu-workers`
+- `--target-rows-per-group`
+- `--target-bytes-per-group`
+- `--input-chunk-size`
+- `--max-batch-size`
+- `--target-gpu-memory-fraction`
+- `--prefetch-queue-size`
+- `--prediction-row-budget`
+- `--profiling`
+- `CUDA_VISIBLE_DEVICES`
+- `MOLE_TORCH_VERSION`
+- `MOLE_TORCH_CUDA_TAG`
+- `MOLE_TORCH_INDEX_URL`
+
+`--deterministic-representation` is a reproducibility knob. It keeps the same
+model semantics but can change low-level CUDA execution choices and slow down
+throughput.
+
+### `num_graph_workers=0`
+
+`num_graph_workers` controls the MolE pre-forward CPU graph path:
+
+`SMILES -> RDKit molecule -> graph features -> PyG DataLoader batch`
+
+It does not disable graph construction. It only controls whether extra
+DataLoader workers are used:
+
+- `--num-graph-workers 0`
+  - disable extra graph workers
+  - build graphs synchronously in the main process
+- `--num-graph-workers auto|N>0`
+  - use additional workers and prefetch to overlap graph preparation with later
+    stages
+
+This setting should not change prediction semantics for a fixed model and
+backend. It only changes throughput and CPU resource contention. On the current
+2080 Ti host, `--num-graph-workers 0` benchmarked faster than worker
+auto-selection.
 
 ```bash
 # Install the local environment
@@ -92,10 +218,34 @@ pixi run mole embed --smiles CCO
 # Predict strain-level antimicrobial probabilities
 pixi run mole predict --smiles CCO
 
-# Batch screen a CSV/TSV file or tar archive for broad-spectrum candidates
+# Batch screen a CSV/TSV file, Parquet source, tar archive, or SQLite database
 pixi run mole screen \
   --input-path data/04.new_predictions/2026-04-21_screening/macro_split_ring16_scheme_b_fix_pos13_per_scaffold_2026-04-21.tar.gz \
-  --output-dir data/04.new_predictions/2026-04-21_screening/runs/demo
+  --output-dir data/04.new_predictions/2026-04-21_screening/runs/demo \
+  --max-batch-size 16384 \
+  --target-gpu-memory-fraction 0.8 \
+  --input-chunk-size 10000 \
+  --prefetch-queue-size 4
+
+# Preferred high-throughput path: preprocess large CSV/TSV inputs into Parquet shards
+pixi run mole preprocess-screening-input \
+  --input-path data/04.new_predictions/raw/input.csv \
+  --output-dir data/04.new_predictions/prepared \
+  --smiles-colname smiles \
+  --chem-id-colname chem_id \
+  --source-group batch_a \
+  --rows-per-shard 100000 \
+  --row-group-size 4000
+
+# Then screen the prepared Parquet file or shard directory
+pixi run mole screen \
+  --input-path data/04.new_predictions/prepared/batch_a \
+  --output-dir data/04.new_predictions/runs/batch_a \
+  --classifier-backend pickle \
+  --num-graph-workers 0 \
+  --graph-batch-size 1024 \
+  --prediction-row-budget 8192 \
+  --profiling
 
 # Compute REINVENT4 rewards
 pixi run mole score \
@@ -115,17 +265,53 @@ Notes:
 - `mole score` automatically fills `site_reward.scaffold_smiles` from
   `--scaffold-file` when the objective enables `site_reward` but does not embed
   a scaffold.
-- `mole screen` accepts CSV/TSV files, tar archive bundles, or SQLite
-  databases, auto-fills missing `chem_id` values, writes a total summary table
-  first, and also writes per-source grouped results under `by_source/`.
-- The default classifier backend is `auto`; Timber is used when the compiled
-  artifact is available, otherwise the original pickle backend is used.
+- For high-throughput batch screening, do not treat raw `tar.gz` bundles or a
+  single huge CSV as the preferred execution format. Preprocess them into
+  Parquet shards first. See
+  [docs/batch_screening_input_format.md](docs/batch_screening_input_format.md).
+- `mole screen` accepts CSV/TSV files, Parquet files, Parquet shard
+  directories, tar archive bundles, or SQLite
+  databases. It will intelligently group batches based on available CPU/RAM, mapping
+  items dynamically without relying on fixed scaffold sizes or arbitrary constants.
+  It auto-fills missing `chem_id` values, evaluates chunks efficiently, writes a
+  total summary table first, and also writes per-source grouped results under `by_source/`.
+- The default classifier backend is `auto`; it prefers the original
+  pickle/XGBoost model when available and falls back to Timber only when the
+  pickle model is missing. This keeps results aligned with the original MolE
+  prediction path and is faster for high-throughput local screening.
 - `pixi run install-cuda-torch` installs a CUDA-enabled PyTorch wheel into the
   active Pixi environment. Use `MOLE_TORCH_CUDA_TAG` and `MOLE_TORCH_VERSION`
   to switch CUDA wheels when moving to another NVIDIA GPU machine.
 - You can override the MolE checkpoint path with `MOLE_MOLE_MODEL_PATH`.
-- You can force the classifier backend with `MOLE_CLASSIFIER_BACKEND=timber`
-  or `MOLE_CLASSIFIER_BACKEND=pickle`.
+- You can override the pickle/XGBoost model path with
+  `MOLE_PICKLE_MODEL_PATH`.
+- You can override the Timber compiled model directory with
+  `MOLE_TIMBER_MODEL_DIR`.
+- You can force the classifier backend with `--classifier-backend timber`,
+  `--classifier-backend pickle`, `MOLE_CLASSIFIER_BACKEND=timber`, or
+  `MOLE_CLASSIFIER_BACKEND=pickle`.
+
+## Runtime Environment Variables
+
+These are the runtime variables worth knowing when moving across machines or
+pinning processes to specific GPUs:
+
+| Variable | Purpose | Result impact |
+| --- | --- | --- |
+| `MOLE_CLASSIFIER_BACKEND` | Backend preference: `auto`, `pickle`, `timber` | Can change result content |
+| `MOLE_MOLE_MODEL_PATH` | Override MolE checkpoint directory | Can change result content |
+| `MOLE_PICKLE_MODEL_PATH` | Override pickle/XGBoost model path | Can change result content |
+| `MOLE_TIMBER_MODEL_DIR` | Override Timber compiled model directory | Can change result content |
+| `CUDA_VISIBLE_DEVICES` | Bind the process to one or more visible GPUs | Performance/device only |
+| `MOLE_TORCH_VERSION` | Wheel version used by `pixi run install-cuda-torch` | Install/runtime only |
+| `MOLE_TORCH_CUDA_TAG` | CUDA wheel tag used by `pixi run install-cuda-torch` | Install/runtime only |
+| `MOLE_TORCH_INDEX_URL` | Custom PyTorch wheel index URL | Install/runtime only |
+
+For the complete batch screening parameter handbook, read
+[docs/batch_screening_input_format.md](docs/batch_screening_input_format.md).
+
+For the complete CLI parameter reference across all `mole` subcommands, read
+[docs/cli_reference.md](docs/cli_reference.md).
 
 ## Change Index
 
@@ -139,6 +325,9 @@ Notes:
 For a concise map from feature area to Python file, see:
 
 - [docs/repo_layout.md](docs/repo_layout.md)
+- [docs/batch_screening_input_format.md](docs/batch_screening_input_format.md)
+- `src/prediction_scheduler.py`: Adaptive single-GPU batch scheduler
+- `src/screening_sources.py`: Streaming archive and tabular input loaders
 
 That document is the canonical reference for where the current entrypoints,
 legacy scripts, and workflow helpers live.

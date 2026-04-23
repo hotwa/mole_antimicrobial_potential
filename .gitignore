@@ -57,6 +57,8 @@ ckpt/**
 # --- Logs & Temp ---
 *.log
 workflow/logdir/**
+.trash/cache/**
+.trash/runtime_logs/**
 
 # --- Data & Outputs ---
 *.tar.gz

@@ -7,8 +7,8 @@ under `scripts/legacy/`.
 ## Project Overview
 
 This project is a MolE-based antimicrobial discovery system. It takes SMILES
-strings as input, converts them into MolE embeddings, and then uses XGBoost or
-Timber-backed classifiers to estimate antimicrobial activity across many
+strings as input, converts them into MolE embeddings, and then uses the original
+pickle/XGBoost classifier or an optional Timber backend to estimate antimicrobial activity across many
 bacterial strains. The same core predictor powers the CLI, the FastAPI server,
 the MCP server, and the REINVENT4 scoring workflow.
 
@@ -41,6 +41,8 @@ The shortest path for common tasks is:
   - `pixi run mole predict --smiles CCO`
 - Batch screening from CSV/TSV/archive inputs:
   - `pixi run mole screen --input-path data/04.new_predictions/2026-04-21_screening/macro_split_ring16_scheme_b_fix_pos13_per_scaffold_2026-04-21.tar.gz --output-dir data/04.new_predictions/2026-04-21_screening/runs/demo`
+- Preferred high-throughput preprocessing:
+  - `pixi run mole preprocess-screening-input --input-path <raw_csv> --output-dir <prepared_dir> --smiles-colname <smiles_col> --chem-id-colname <chem_id_col> --source-group <group_name>`
 - REINVENT4 reward computation:
   - `pixi run mole score --objective-file workflows/reinvent4/inputs/objectives/pathogen_group_a.site_reward.prototype.json --smiles CCO`
 - REINVENT4 optimization:
@@ -53,6 +55,28 @@ The shortest path for common tasks is:
 Use the canonical CLI/API/MCP entrypoints above for new work. Use the legacy
 wrappers only when reproducing old behavior or comparing against historical
 scripts.
+
+For batch-screening input preparation guidance, read:
+
+- [docs/cli_reference.md](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/cli_reference.md)
+- [docs/batch_screening_input_format.md](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/batch_screening_input_format.md)
+
+That document is the canonical explanation of why raw `tar.gz` bundles and one
+huge CSV are transport/storage formats, not preferred screening formats.
+
+## Root Directory Policy
+
+The root should stay small and predictable:
+
+- keep only canonical entrypoints and repository-level configuration at the root
+- keep repository-level agent instruction files such as `AGENTS.md` and `CLAUDE.md` at the root
+- keep implementation under `src/`
+- keep workflow-specific assets under `workflow/` or `workflows/`
+- keep one-off recovery artifacts under `.trash/`
+- keep auxiliary tool subprojects under `tools/`
+
+If a file is not a canonical entrypoint, project-level config, or a standard
+repository document, it should usually not stay at the root.
 
 ## Canonical Entrypoints
 
@@ -68,6 +92,98 @@ Use these first for new work:
   - Streamable HTTP FastMCP server
   - Recommended usage: `python mcp_server_enhanced.py`
 
+Additional layout notes:
+
+- [`docker/nginx/`](/home/lingyuzeng/project/mole_antimicrobial_potential/docker/nginx)
+  - Nginx configuration used by the legacy container deployment path
+- [`tools/timber/`](/home/lingyuzeng/project/mole_antimicrobial_potential/tools/timber)
+  - Timber conversion/export helper subproject
+- [`docs/references/papers/`](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/references/papers)
+  - Local reference PDFs and related literature assets
+- [`.trash/`](/home/lingyuzeng/project/mole_antimicrobial_potential/.trash)
+  - Quarantine area for ad hoc scripts, scratch inputs, and runtime leftovers
+
+## Parameter Ownership Index
+
+If you need to understand where a CLI knob actually lands in the code, use this
+index first.
+
+- [`mole_cli.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/mole_cli.py)
+  - owns the public `mole` CLI surface
+  - defines `mole predict`, `mole screen`, `mole preprocess-screening-input`,
+    `mole benchmark-screening-inputs`, `mole doctor`, `mole score`,
+    `mole optimize`
+  - important parameter families:
+    `--classifier-backend`, `--num-graph-workers`, `--graph-batch-size`,
+    `--prefetch-batches`, `--profiling`,
+    `--deterministic-representation`, `--grouping-mode`, `--cpu-workers`,
+    `--input-chunk-size`, `--max-batch-size`,
+    `--target-gpu-memory-fraction`, `--prediction-row-budget`
+- [`src/prediction_scheduler.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/prediction_scheduler.py)
+  - owns adaptive GPU micro-batching and runtime snapshots
+  - consumes GPU-facing knobs such as `--max-batch-size`,
+    `--target-gpu-memory-fraction`, device selection, and profiling snapshots
+- [`src/predictor.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/predictor.py)
+  - bridges CLI/API requests to MolE representation and classifier backends
+  - forwards `--classifier-backend`, `--num-graph-workers`,
+    `--graph-batch-size`, `--prefetch-batches`,
+    `--deterministic-representation`, and profiling enablement
+- [`workflow/dataset/dataset_representation.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/workflow/dataset/dataset_representation.py)
+  - owns the MolE pre-forward CPU graph path:
+    `SMILES -> RDKit -> graph -> PyG DataLoader`
+  - this is where `num_graph_workers`, `graph_batch_size`,
+    `prefetch_batches`, `pin_memory`, and deterministic CUDA controls become
+    DataLoader / execution settings
+  - `num_graph_workers=0` means no extra graph workers; graph construction stays
+    in the main process and should not change prediction semantics
+- [`src/screening_planner.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/screening_planner.py)
+  - owns input work-unit planning for `mole screen`
+  - consumes `--grouping-mode`, `--target-rows-per-group`,
+    `--target-bytes-per-group`, `--cpu-workers`, and source-specific selectors
+- [`src/screening_sources.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/screening_sources.py)
+  - owns archive / SQLite / tabular / parquet normalization into screening
+    chunks
+  - consumes `--archive-pattern`, `--archive-smiles-colname`,
+    `--archive-chem-id-colname`, `--sqlite-table`, `--sqlite-query`,
+    `--smiles-colname`, `--chem-id-colname`, `--input-chunk-size`
+- [`src/batch_screening.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/batch_screening.py)
+  - owns producer/consumer flow for `mole screen`
+  - consumes `--no-dedupe-smiles`, `--aggregate-scores` / `--per-strain`,
+    `--prefetch-queue-size`, `--prediction-row-budget`, output writing, and
+    manifest runtime fields
+- [`src/preprocess_screening_input.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/preprocess_screening_input.py)
+  - owns `mole preprocess-screening-input`
+  - consumes `--input-path`, `--output-dir`, `--smiles-colname`,
+    `--chem-id-colname`, `--source-group`, `--rows-per-shard`,
+    `--row-group-size`
+- [`src/classifier_backend.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/classifier_backend.py)
+  - owns backend discovery and backend-specific model paths
+  - reads `MOLE_CLASSIFIER_BACKEND`, `MOLE_PICKLE_MODEL_PATH`,
+    `MOLE_TIMBER_MODEL_DIR`
+
+## Runtime Environment Index
+
+These environment variables matter most when moving between machines:
+
+- `MOLE_CLASSIFIER_BACKEND`
+  - default classifier backend preference
+  - can change result content
+- `MOLE_MOLE_MODEL_PATH`
+  - override MolE checkpoint directory
+  - can change result content
+- `MOLE_PICKLE_MODEL_PATH`
+  - override pickle/XGBoost model path
+  - can change result content
+- `MOLE_TIMBER_MODEL_DIR`
+  - override Timber compiled model directory
+  - can change result content
+- `CUDA_VISIBLE_DEVICES`
+  - bind a process to a specific GPU or GPU subset
+  - affects device placement and throughput, not intended prediction semantics
+- `MOLE_TORCH_VERSION`, `MOLE_TORCH_CUDA_TAG`, `MOLE_TORCH_INDEX_URL`
+  - control `pixi run install-cuda-torch`
+  - install/runtime only
+
 ## Core Library Modules
 
 Import these from other code instead of duplicating behavior:
@@ -76,10 +192,16 @@ Import these from other code instead of duplicating behavior:
   - MolE SMILES-to-embedding pipeline
 - [`src/predictor.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/predictor.py)
   - Shared antimicrobial predictor service
+- [`src/prediction_scheduler.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/prediction_scheduler.py)
+  - Adaptive single-GPU batch scheduler
+- [`src/screening_sources.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/screening_sources.py)
+  - Streaming archive, CSV, and SQLite multi-worker data loaders
+- [`src/screening_planner.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/screening_planner.py)
+  - Planners that dynamically split large sources into parallel manageable work-units
 - [`src/batch_screening.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/batch_screening.py)
-  - Batch ingestion and screening helpers for CSV/TSV/archive/SQLite inputs
+  - Batch screening loop managing ThreadPoolExecutor and Single GPU producer/consumer stream
 - [`src/classifier_backend.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/classifier_backend.py)
-  - Timber/pickle backend selection
+  - Pickle/XGBoost and Timber backend selection; `auto` prefers pickle when available
 - [`src/models.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/models.py)
   - Request schemas, objective normalization, and validation
 - [`src/reinvent_scoring.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/reinvent_scoring.py)
