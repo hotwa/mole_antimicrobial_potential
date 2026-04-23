@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import os
+import threading
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase
@@ -311,16 +313,23 @@ class PredictorMolEModelCacheTestCase(TestCase):
         self.assertIn("growth_inhibition_seconds", profile)
         self.assertIn("aggregate_scores_seconds", profile)
         self.assertIn("first_result_latency_seconds", profile)
+        self.assertIn("classifier_stage_seconds", profile)
+        self.assertIn("classifier_workers", profile)
+        self.assertIn("classifier_inflight_batches", profile)
         self.assertIn("streaming_batches", profile)
         self.assertEqual(len(profile["streaming_batches"]), 2)
         self.assertIn("representation_batch_production_seconds", profile["streaming_batches"][0])
         self.assertIn("classifier_batch_inference_seconds", profile["streaming_batches"][0])
+        self.assertIn("classifier_batch_stage_seconds", profile["streaming_batches"][0])
         self.assertIn("aggregate_accumulate_seconds", profile["streaming_batches"][0])
         self.assertEqual(profile["graph_build"]["graph_items"], 2)
         self.assertAlmostEqual(profile["graph_build"]["graph_total_seconds"], 2.2)
         self.assertGreaterEqual(profile["prediction_frame_seconds"], 0.0)
         self.assertGreaterEqual(profile["growth_inhibition_seconds"], 0.0)
         self.assertGreaterEqual(profile["aggregate_scores_seconds"], 0.0)
+        self.assertGreaterEqual(profile["classifier_stage_seconds"], 0.0)
+        self.assertEqual(profile["classifier_workers"], 1)
+        self.assertEqual(profile["classifier_inflight_batches"], 2)
 
     def test_aggregate_scores_from_matrix_matches_legacy_groupby_result(self) -> None:
         predictor = self._build_predictor()
@@ -489,6 +498,97 @@ class PredictorMolEModelCacheTestCase(TestCase):
             [row["chem_id"] for row in result],
             expected_df.index.tolist(),
         )
+
+    def test_streaming_aggregate_uses_one_classifier_executor_for_multiple_batches(self) -> None:
+        predictor = self._build_predictor()
+        predictor._model_loaded = True
+        predictor.strain_ohe = pd.DataFrame(
+            np.eye(2, dtype=np.float32),
+            index=["Strain A (NT1)", "Strain B (NT2)"],
+            columns=["('Strain A (NT1)',)", "('Strain B (NT2)',)"],
+        )
+        predictor._gram_dict = {"NT1": "negative", "NT2": "positive"}
+
+        representation = pd.DataFrame(
+            [[1.0, 2.0], [3.0, 4.0]],
+            index=pd.Index(["mol1", "mol2"], name="chem_id"),
+            columns=["feat_a", "feat_b"],
+        )
+
+        class _RecordingClassifier:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def predict_proba(self, X):
+                self.calls.append(threading.current_thread().name)
+                rows = len(X)
+                return np.tile(np.array([[0.2, 0.8]], dtype=np.float32), (rows, 1))
+
+        class _InlineExecutor:
+            init_count = 0
+            submit_count = 0
+            max_workers_seen = []
+
+            def __init__(self, max_workers=None, thread_name_prefix=""):
+                type(self).init_count += 1
+                type(self).max_workers_seen.append(max_workers)
+
+            def submit(self, fn, *args, **kwargs):
+                type(self).submit_count += 1
+                future = Future()
+                try:
+                    future.set_result(fn(*args, **kwargs))
+                except Exception as exc:  # pragma: no cover - exercised only on failure
+                    future.set_exception(exc)
+                return future
+
+            def shutdown(self, wait=True, cancel_futures=False):
+                return None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                self.shutdown()
+                return False
+
+        predictor.model = _RecordingClassifier()
+        batches = [
+            {
+                "batch_index": 0,
+                "chem_ids": ["mol1"],
+                "embedding_batch": representation.iloc[[0]],
+                "profiling": None,
+            },
+            {
+                "batch_index": 1,
+                "chem_ids": ["mol2"],
+                "embedding_batch": representation.iloc[[1]],
+                "profiling": None,
+            },
+        ]
+
+        with patch.object(predictor, "_iter_mole_representation_batches", return_value=iter(batches)), patch(
+            "src.predictor.ThreadPoolExecutor",
+            _InlineExecutor,
+        ):
+            import asyncio
+            from src.models import MoleculeInput
+
+            result = asyncio.run(
+                predictor.predict(
+                    MoleculeInput(smiles=["CCO", "CCN"], aggregate_scores=True).normalize(),
+                    classifier_workers=1,
+                    classifier_inflight_batches=2,
+                )
+            )
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(_InlineExecutor.init_count, 1)
+        self.assertEqual(_InlineExecutor.submit_count, 2)
+        self.assertEqual(_InlineExecutor.max_workers_seen, [1])
+        self.assertEqual(len(predictor.model.calls), 2)
+        self.assertTrue(all(name == predictor.model.calls[0] for name in predictor.model.calls))
 
     def test_streaming_aggregate_path_does_not_wrap_entire_job_in_wait_for(self) -> None:
         predictor = self._build_predictor()

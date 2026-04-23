@@ -54,6 +54,9 @@ def _initial_profile_aggregate() -> Dict[str, Any]:
         "prediction_frame_seconds": 0.0,
         "growth_inhibition_seconds": 0.0,
         "aggregate_scores_seconds": 0.0,
+        "classifier_stage_seconds": 0.0,
+        "classifier_workers": None,
+        "classifier_inflight_batches": None,
         "result_records_seconds": 0.0,
         "graph_build": {
             "graph_items": 0,
@@ -82,9 +85,14 @@ def _merge_profile_aggregate(aggregate: Dict[str, Any], profile: Dict[str, Any] 
         "prediction_frame_seconds",
         "growth_inhibition_seconds",
         "aggregate_scores_seconds",
+        "classifier_stage_seconds",
         "result_records_seconds",
     ):
         aggregate[key] += float(profile.get(key, 0.0))
+
+    for key in ("classifier_workers", "classifier_inflight_batches"):
+        if aggregate.get(key) is None and key in profile:
+            aggregate[key] = profile.get(key)
 
     graph_profile = profile.get("graph_build")
     if not isinstance(graph_profile, dict):
@@ -146,6 +154,8 @@ class PredictionScheduler:
         graph_batch_size: int = 1024,
         prefetch_batches: int = 2,
         deterministic_representation: bool = False,
+        classifier_workers: int | str = "auto",
+        classifier_inflight_batches: int | str = "auto",
     ) -> None:
         self._predictor = predictor
         self.max_batch_size = max_batch_size
@@ -155,6 +165,8 @@ class PredictionScheduler:
         self.graph_batch_size = graph_batch_size
         self.prefetch_batches = prefetch_batches
         self.deterministic_representation = deterministic_representation
+        self.classifier_workers = classifier_workers
+        self.classifier_inflight_batches = classifier_inflight_batches
         self._last_profile: Optional[Dict[str, Any]] = None
 
         # Whether ensure_loaded() has already been awaited once
@@ -187,6 +199,8 @@ class PredictionScheduler:
         prefetch_batches: Optional[int] = None,
         enable_profiling: bool = False,
         deterministic_representation: Optional[bool] = None,
+        classifier_workers: int | str | None = None,
+        classifier_inflight_batches: int | str | None = None,
     ) -> List[Dict[str, Any]]:
         """Run prediction over *molecules* with adaptive batching.
 
@@ -264,6 +278,14 @@ class PredictionScheduler:
                         if deterministic_representation is None
                         else deterministic_representation
                     ),
+                    classifier_workers=(
+                        self.classifier_workers if classifier_workers is None else classifier_workers
+                    ),
+                    classifier_inflight_batches=(
+                        self.classifier_inflight_batches
+                        if classifier_inflight_batches is None
+                        else classifier_inflight_batches
+                    ),
                 )
                 if enable_profiling:
                     _merge_profile_aggregate(profile_aggregate, self._predictor.last_profile_snapshot())
@@ -330,6 +352,17 @@ class PredictionScheduler:
             "selected_batch_size": self.current_batch_size,
             "used_cuda": used_cuda,
             "deterministic_representation": self.deterministic_representation,
+            "classifier_workers": (
+                self._last_profile.get("classifier_workers")
+                if isinstance(self._last_profile, dict) and self._last_profile.get("classifier_workers") is not None
+                else self.classifier_workers
+            ),
+            "classifier_inflight_batches": (
+                self._last_profile.get("classifier_inflight_batches")
+                if isinstance(self._last_profile, dict)
+                and self._last_profile.get("classifier_inflight_batches") is not None
+                else self.classifier_inflight_batches
+            ),
             "classifier_backend": getattr(predictor_status, "classifier_backend", None),
             "classifier_backend_preference": getattr(predictor_status, "classifier_backend_preference", None),
             "classifier_backend_path": getattr(predictor_status, "classifier_backend_path", None),

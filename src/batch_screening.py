@@ -39,6 +39,22 @@ def _build_molecules(frame: pd.DataFrame) -> list[MoleculeInfo]:
     ]
 
 
+def iter_frame_batches(frame: pd.DataFrame, batch_size: int):
+    """Yield stable row-order batches for process-mode producer checkpoints."""
+
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+
+    for start in range(0, len(frame), batch_size):
+        yield frame.iloc[start : start + batch_size].reset_index(drop=True).copy()
+
+
+def screen_frame_sync(**kwargs) -> pd.DataFrame:
+    """Run ``screen_frame`` from a synchronous multiprocessing worker entrypoint."""
+
+    return asyncio.run(screen_frame(**kwargs))
+
+
 async def screen_frame(
     frame: pd.DataFrame,
     aggregate_scores: bool,
@@ -48,6 +64,8 @@ async def screen_frame(
     num_graph_workers: int | str = "auto",
     graph_batch_size: int = 1024,
     prefetch_batches: int = 2,
+    classifier_workers: int | str = "auto",
+    classifier_inflight_batches: int | str = "auto",
     enable_profiling: bool = False,
 ) -> pd.DataFrame:
     """Run batch prediction on a normalized frame and attach metadata."""
@@ -65,6 +83,8 @@ async def screen_frame(
         num_graph_workers=num_graph_workers,
         graph_batch_size=graph_batch_size,
         prefetch_batches=prefetch_batches,
+        classifier_workers=classifier_workers,
+        classifier_inflight_batches=classifier_inflight_batches,
         enable_profiling=enable_profiling,
     )
 
@@ -318,6 +338,8 @@ async def screen_path(
     num_graph_workers: int | str = "auto",
     graph_batch_size: int = 1024,
     prefetch_batches: int = 2,
+    classifier_workers: int | str = "auto",
+    classifier_inflight_batches: int | str = "auto",
     enable_profiling: bool = False,
     prediction_row_budget: int | None = None,
 ) -> ScreeningSummary:
@@ -500,6 +522,8 @@ async def screen_path(
                         num_graph_workers=num_graph_workers,
                         graph_batch_size=graph_batch_size,
                         prefetch_batches=prefetch_batches,
+                        classifier_workers=classifier_workers,
+                        classifier_inflight_batches=classifier_inflight_batches,
                         enable_profiling=enable_profiling,
                     )
                 )

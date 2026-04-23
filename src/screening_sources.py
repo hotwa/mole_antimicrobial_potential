@@ -194,6 +194,68 @@ def _load_sqlite_input(
             yield frame
 
 
+def _resolve_parquet_columns(
+    parquet_file: pq.ParquetFile,
+    source_path: str | Path,
+    smiles_colname: str,
+    chem_id_colname: str,
+) -> tuple[list[str], str, str, str | None, str | None, str | None]:
+    schema_names = set(parquet_file.schema.names)
+    smiles_column = "smiles" if "smiles" in schema_names else smiles_colname
+    chem_id_column = "chem_id" if "chem_id" in schema_names else chem_id_colname
+    source_group_column = "source_group" if "source_group" in schema_names else None
+    source_file_column = "source_file" if "source_file" in schema_names else None
+    source_row_column = "source_row" if "source_row" in schema_names else None
+
+    if smiles_column not in schema_names:
+        raise ValueError(f"Missing SMILES column '{smiles_colname}' in {source_path}")
+
+    columns = [smiles_column]
+    if chem_id_column in schema_names:
+        columns.append(chem_id_column)
+    if source_group_column:
+        columns.append(source_group_column)
+    if source_file_column:
+        columns.append(source_file_column)
+    if source_row_column:
+        columns.append(source_row_column)
+
+    return columns, smiles_column, chem_id_column, source_group_column, source_file_column, source_row_column
+
+
+def _normalize_parquet_frame(
+    frame: pd.DataFrame,
+    *,
+    smiles_column: str,
+    chem_id_column: str,
+    source_group_column: str | None,
+    source_file_column: str | None,
+    source_row_column: str | None,
+    default_source_group: str,
+    default_source_file: str,
+    chem_id_prefix: str,
+    row_offset: int,
+) -> pd.DataFrame:
+    if chem_id_column not in frame.columns:
+        frame[chem_id_column] = [f"{chem_id_prefix}__{row_offset + 1 + i}" for i in range(len(frame))]
+
+    frame = frame.rename(columns={smiles_column: "smiles", chem_id_column: "chem_id"})
+    if source_group_column and source_group_column in frame.columns:
+        frame["source_group"] = frame[source_group_column].astype(str)
+    else:
+        frame["source_group"] = default_source_group
+    if source_file_column and source_file_column in frame.columns:
+        frame["source_file"] = frame[source_file_column].astype(str)
+    else:
+        frame["source_file"] = default_source_file
+    if source_row_column and source_row_column in frame.columns:
+        frame["source_row"] = frame[source_row_column]
+    else:
+        frame["source_row"] = range(row_offset + 1, row_offset + 1 + len(frame))
+
+    return frame
+
+
 def _load_parquet_input(
     path: Path,
     smiles_colname: str,
@@ -201,34 +263,30 @@ def _load_parquet_input(
     chunk_size: int,
 ) -> Iterator[pd.DataFrame]:
     parquet_file = pq.ParquetFile(path)
-    schema_names = set(parquet_file.schema.names)
-    smiles_column = "smiles" if "smiles" in schema_names else smiles_colname
-    chem_id_column = "chem_id" if "chem_id" in schema_names else chem_id_colname
-    source_group_column = "source_group" if "source_group" in schema_names else None
-
-    if smiles_column not in schema_names:
-        raise ValueError(f"Missing SMILES column '{smiles_colname}' in {path}")
-
-    columns = [smiles_column]
-    if chem_id_column in schema_names:
-        columns.append(chem_id_column)
-    if source_group_column:
-        columns.append(source_group_column)
-
+    (
+        columns,
+        smiles_column,
+        chem_id_column,
+        source_group_column,
+        source_file_column,
+        source_row_column,
+    ) = _resolve_parquet_columns(parquet_file, path, smiles_colname, chem_id_colname)
     row_offset = 0
     default_source_group = _basename_without_suffixes(path)
     for batch in parquet_file.iter_batches(batch_size=chunk_size, columns=columns):
         frame = batch.to_pandas()
-        if chem_id_column not in frame.columns:
-            frame[chem_id_column] = [f"{default_source_group}__{row_offset + 1 + i}" for i in range(len(frame))]
-
-        frame = frame.rename(columns={smiles_column: "smiles", chem_id_column: "chem_id"})
-        frame["source_file"] = str(path)
-        if source_group_column and source_group_column in frame.columns:
-            frame["source_group"] = frame[source_group_column].astype(str)
-        else:
-            frame["source_group"] = default_source_group
-        frame["source_row"] = range(row_offset + 1, row_offset + 1 + len(frame))
+        frame = _normalize_parquet_frame(
+            frame,
+            smiles_column=smiles_column,
+            chem_id_column=chem_id_column,
+            source_group_column=source_group_column,
+            source_file_column=source_file_column,
+            source_row_column=source_row_column,
+            default_source_group=default_source_group,
+            default_source_file=str(path),
+            chem_id_prefix=default_source_group,
+            row_offset=row_offset,
+        )
         row_offset += len(frame)
         yield frame
 
@@ -360,36 +418,33 @@ def process_work_unit(
 
     elif unit.source_type == "parquet":
         parquet_file = pq.ParquetFile(unit.source_path)
-        schema_names = set(parquet_file.schema.names)
-        smiles_column = "smiles" if "smiles" in schema_names else smiles_colname
-        chem_id_column = "chem_id" if "chem_id" in schema_names else chem_id_colname
-        source_group_column = "source_group" if "source_group" in schema_names else None
-
-        if smiles_column not in schema_names:
-            raise ValueError(f"Missing SMILES column '{smiles_colname}' in {unit.source_path}")
-
-        columns = [smiles_column]
-        if chem_id_column in schema_names:
-            columns.append(chem_id_column)
-        if source_group_column:
-            columns.append(source_group_column)
-
+        (
+            columns,
+            smiles_column,
+            chem_id_column,
+            source_group_column,
+            source_file_column,
+            source_row_column,
+        ) = _resolve_parquet_columns(parquet_file, unit.source_path, smiles_colname, chem_id_colname)
         row_offset = 0
         for batch in parquet_file.iter_batches(batch_size=chunk_size, columns=columns):
             frame = batch.to_pandas()
-            if chem_id_column not in frame.columns:
-                frame[chem_id_column] = [f"{Path(unit.source_path).stem}__{row_offset + 1 + i}" for i in range(len(frame))]
+            frame = _normalize_parquet_frame(
+                frame,
+                smiles_column=smiles_column,
+                chem_id_column=chem_id_column,
+                source_group_column=source_group_column,
+                source_file_column=source_file_column,
+                source_row_column=source_row_column,
+                default_source_group=unit.source_group or unit.group_id,
+                default_source_file=str(unit.source_path),
+                chem_id_prefix=Path(unit.source_path).stem,
+                row_offset=row_offset,
+            )
+            row_offset += len(frame)
 
-            frame = frame.rename(columns={smiles_column: "smiles", chem_id_column: "chem_id"})
-            frame["source_file"] = str(unit.source_path)
-            if source_group_column and source_group_column in frame.columns:
-                frame["source_group"] = frame[source_group_column].astype(str)
-            else:
-                frame["source_group"] = unit.source_group or unit.group_id
             if unit.source_member:
                 frame["source_member"] = str(unit.source_member)
-            frame["source_row"] = range(row_offset + 1, row_offset + 1 + len(frame))
-            row_offset += len(frame)
 
             frame = frame.dropna(subset=["smiles"]).copy()
             if not frame.empty:

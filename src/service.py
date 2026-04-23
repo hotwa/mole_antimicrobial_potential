@@ -28,6 +28,8 @@ def get_scheduler(
     graph_batch_size: int = 1024,
     prefetch_batches: int = 2,
     deterministic_representation: bool = False,
+    classifier_workers: int | str = "auto",
+    classifier_inflight_batches: int | str = "auto",
 ) -> "PredictionScheduler":
     """Return the singleton prediction scheduler."""
     global _scheduler
@@ -49,6 +51,8 @@ def get_scheduler(
             graph_batch_size=graph_batch_size,
             prefetch_batches=prefetch_batches,
             deterministic_representation=deterministic_representation,
+            classifier_workers=classifier_workers,
+            classifier_inflight_batches=classifier_inflight_batches,
         )
     return _scheduler
 
@@ -62,6 +66,8 @@ def create_scheduler(
     graph_batch_size: int = 1024,
     prefetch_batches: int = 2,
     deterministic_representation: bool = False,
+    classifier_workers: int | str = "auto",
+    classifier_inflight_batches: int | str = "auto",
 ) -> "PredictionScheduler":
     """Create a fresh scheduler bound to the shared predictor singleton."""
     from src.prediction_scheduler import (
@@ -81,4 +87,6 @@ def create_scheduler(
         graph_batch_size=graph_batch_size,
         prefetch_batches=prefetch_batches,
         deterministic_representation=deterministic_representation,
+        classifier_workers=classifier_workers,
+        classifier_inflight_batches=classifier_inflight_batches,
     )

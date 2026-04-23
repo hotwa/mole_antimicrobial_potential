@@ -9,6 +9,7 @@ import os
 import re
 import time
 import threading
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -39,6 +40,8 @@ GRAPH_BUILD_PROFILE_SUM_FIELDS = (
     "dataloader_iter_seconds",
     "model_forward_seconds",
 )
+DEFAULT_CLASSIFIER_WORKERS: int | str = "auto"
+DEFAULT_CLASSIFIER_INFLIGHT_BATCHES: int | str = "auto"
 
 
 def _format_strain_feature_name(strain_name: str) -> str:
@@ -471,12 +474,19 @@ class AntimicrobialPredictor:
         prefetch_batches: int,
         enable_profiling: bool,
         deterministic_representation: bool,
+        classifier_workers: int | str = DEFAULT_CLASSIFIER_WORKERS,
+        classifier_inflight_batches: int | str = DEFAULT_CLASSIFIER_INFLIGHT_BATCHES,
     ) -> tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
         molecules = normalized.molecules or []
         if not molecules:
             raise ValueError("No molecules provided for prediction")
 
         strain_names = self.strain_ohe.index.astype(str).to_numpy(copy=False)
+        resolved_classifier_workers = self._resolve_classifier_workers(classifier_workers)
+        resolved_classifier_inflight_batches = self._resolve_classifier_inflight_batches(
+            classifier_inflight_batches,
+            resolved_classifier_workers,
+        )
         iterator = self._iter_mole_representation_batches(
             molecules,
             num_graph_workers=num_graph_workers,
@@ -493,79 +503,119 @@ class AntimicrobialPredictor:
         growth_inhibition_seconds = 0.0
         aggregate_scores_seconds = 0.0
         result_records_seconds = 0.0
+        classifier_stage_seconds = 0.0
         first_result_latency_seconds: Optional[float] = None
         graph_build_profile: Optional[Dict[str, Any]] = None
-        streaming_batches: list[Dict[str, Any]] = []
-        aggregate_batches: list[pd.DataFrame] = []
+        streaming_batches_by_index: dict[int, Dict[str, Any]] = {}
+        aggregate_batches_by_index: dict[int, pd.DataFrame] = {}
+        pending_batches: dict[Future[Dict[str, Any]], Dict[str, Any]] = {}
 
         pipeline_start = time.perf_counter()
-        while True:
-            representation_batch_start = time.perf_counter()
-            try:
-                batch = next(iterator)
-            except StopIteration:
-                break
-            representation_batch_seconds = time.perf_counter() - representation_batch_start
-            representation_seconds += representation_batch_seconds
+        with ThreadPoolExecutor(
+            max_workers=resolved_classifier_workers,
+            thread_name_prefix="predictor-classifier",
+        ) as classifier_executor:
+            while True:
+                if len(pending_batches) >= resolved_classifier_inflight_batches:
+                    (
+                        first_result_latency_seconds,
+                        expand_seconds,
+                        xgboost_seconds,
+                        growth_inhibition_seconds,
+                        aggregate_scores_seconds,
+                        classifier_stage_seconds,
+                    ) = self._collect_classifier_batch_results(
+                        pending_batches=pending_batches,
+                        aggregate_batches_by_index=aggregate_batches_by_index,
+                        streaming_batches_by_index=streaming_batches_by_index,
+                        wait_for_result=True,
+                        pipeline_start=pipeline_start,
+                        enable_profiling=enable_profiling,
+                        first_result_latency_seconds=first_result_latency_seconds,
+                        strain_expand_seconds=expand_seconds,
+                        xgboost_seconds=xgboost_seconds,
+                        growth_inhibition_seconds=growth_inhibition_seconds,
+                        aggregate_scores_seconds=aggregate_scores_seconds,
+                        classifier_stage_seconds=classifier_stage_seconds,
+                    )
 
-            representation_df = batch["embedding_batch"]
+                representation_batch_start = time.perf_counter()
+                try:
+                    batch = next(iterator)
+                except StopIteration:
+                    break
+                representation_batch_seconds = time.perf_counter() - representation_batch_start
+                representation_seconds += representation_batch_seconds
 
-            expand_start = time.perf_counter()
-            x_input_values = self._strain_feature_array(representation_df)
-            expand_seconds += time.perf_counter() - expand_start
+                if enable_profiling:
+                    graph_build_profile = self._merge_graph_build_profile(
+                        graph_build_profile,
+                        batch.get("profiling"),
+                    )
 
-            classifier_batch_start = time.perf_counter()
-            y_pred = self.model.predict_proba(x_input_values)
-            classifier_batch_seconds = time.perf_counter() - classifier_batch_start
-            xgboost_seconds += classifier_batch_seconds
-
-            y_pred_array = np.asarray(y_pred)
-            probability_values = y_pred_array[:, 1]
-
-            growth_inhibition_start = time.perf_counter()
-            chem_ids = representation_df.index.astype(str).to_numpy(copy=False)
-            probability_matrix = probability_values.reshape(len(chem_ids), len(strain_names))
-            growth_inhibition_matrix = (
-                probability_matrix >= normalized.app_threshold
-            ).astype(np.int64, copy=False)
-            growth_inhibition_seconds += time.perf_counter() - growth_inhibition_start
-
-            aggregate_scores_start = time.perf_counter()
-            batch_agg_df = self._aggregate_scores_from_matrix(
-                probability_matrix=probability_matrix,
-                growth_inhibition_matrix=growth_inhibition_matrix,
-                chem_ids=chem_ids,
-                strain_names=strain_names,
-            )
-            batch_agg_df["broad_spectrum"] = (
-                batch_agg_df["ginhib_total"].to_numpy(copy=False) >= normalized.min_nkill
-            ).astype(np.int64, copy=False)
-            aggregate_batch_seconds = time.perf_counter() - aggregate_scores_start
-            aggregate_scores_seconds += aggregate_batch_seconds
-            aggregate_batches.append(batch_agg_df)
-
-            if first_result_latency_seconds is None:
-                first_result_latency_seconds = time.perf_counter() - pipeline_start
-
-            if enable_profiling:
-                graph_build_profile = self._merge_graph_build_profile(
-                    graph_build_profile,
-                    batch.get("profiling"),
+                future = classifier_executor.submit(
+                    self._classify_aggregate_batch_sync,
+                    batch["batch_index"],
+                    batch["embedding_batch"],
+                    strain_names,
+                    normalized.app_threshold,
+                    normalized.min_nkill,
                 )
-                streaming_batches.append(
-                    {
-                        "batch_index": batch["batch_index"],
-                        "chem_ids": list(batch["chem_ids"]),
-                        "representation_batch_production_seconds": representation_batch_seconds,
-                        "classifier_batch_inference_seconds": classifier_batch_seconds,
-                        "aggregate_accumulate_seconds": aggregate_batch_seconds,
-                    }
+                pending_batches[future] = {
+                    "batch_index": batch["batch_index"],
+                    "chem_ids": list(batch["chem_ids"]),
+                    "representation_batch_production_seconds": representation_batch_seconds,
+                }
+                (
+                    first_result_latency_seconds,
+                    expand_seconds,
+                    xgboost_seconds,
+                    growth_inhibition_seconds,
+                    aggregate_scores_seconds,
+                    classifier_stage_seconds,
+                ) = self._collect_classifier_batch_results(
+                    pending_batches=pending_batches,
+                    aggregate_batches_by_index=aggregate_batches_by_index,
+                    streaming_batches_by_index=streaming_batches_by_index,
+                    wait_for_result=False,
+                    pipeline_start=pipeline_start,
+                    enable_profiling=enable_profiling,
+                    first_result_latency_seconds=first_result_latency_seconds,
+                    strain_expand_seconds=expand_seconds,
+                    xgboost_seconds=xgboost_seconds,
+                    growth_inhibition_seconds=growth_inhibition_seconds,
+                    aggregate_scores_seconds=aggregate_scores_seconds,
+                    classifier_stage_seconds=classifier_stage_seconds,
                 )
 
-        if not aggregate_batches:
+            while pending_batches:
+                (
+                    first_result_latency_seconds,
+                    expand_seconds,
+                    xgboost_seconds,
+                    growth_inhibition_seconds,
+                    aggregate_scores_seconds,
+                    classifier_stage_seconds,
+                ) = self._collect_classifier_batch_results(
+                    pending_batches=pending_batches,
+                    aggregate_batches_by_index=aggregate_batches_by_index,
+                    streaming_batches_by_index=streaming_batches_by_index,
+                    wait_for_result=True,
+                    pipeline_start=pipeline_start,
+                    enable_profiling=enable_profiling,
+                    first_result_latency_seconds=first_result_latency_seconds,
+                    strain_expand_seconds=expand_seconds,
+                    xgboost_seconds=xgboost_seconds,
+                    growth_inhibition_seconds=growth_inhibition_seconds,
+                    aggregate_scores_seconds=aggregate_scores_seconds,
+                    classifier_stage_seconds=classifier_stage_seconds,
+                )
+
+        if not aggregate_batches_by_index:
             raise ValueError("No molecules provided for prediction")
 
-        agg_df = pd.concat(aggregate_batches)
+        ordered_batch_indices = sorted(aggregate_batches_by_index)
+        agg_df = pd.concat([aggregate_batches_by_index[index] for index in ordered_batch_indices])
         order = np.argsort(agg_df.index.astype(str).to_numpy(copy=False), kind="stable")
         agg_df = agg_df.take(order)
 
@@ -582,13 +632,178 @@ class AntimicrobialPredictor:
                 "prediction_frame_seconds": prediction_frame_seconds,
                 "growth_inhibition_seconds": growth_inhibition_seconds,
                 "aggregate_scores_seconds": aggregate_scores_seconds,
+                "classifier_stage_seconds": classifier_stage_seconds,
+                "classifier_workers": resolved_classifier_workers,
+                "classifier_inflight_batches": resolved_classifier_inflight_batches,
                 "result_records_seconds": result_records_seconds,
                 "graph_build": graph_build_profile,
                 "first_result_latency_seconds": first_result_latency_seconds or 0.0,
-                "streaming_batches": streaming_batches,
+                "streaming_batches": [
+                    streaming_batches_by_index[index] for index in sorted(streaming_batches_by_index)
+                ],
             }
 
         return records, profile
+
+    def _resolve_classifier_workers(self, classifier_workers: int | str) -> int:
+        if classifier_workers == "auto":
+            return 1
+
+        resolved = int(classifier_workers)
+        if resolved < 1:
+            raise ValueError("classifier_workers must be >= 1 or 'auto'")
+        return resolved
+
+    def _resolve_classifier_inflight_batches(
+        self,
+        classifier_inflight_batches: int | str,
+        classifier_workers: int,
+    ) -> int:
+        if classifier_inflight_batches == "auto":
+            return max(2, classifier_workers + 1)
+
+        resolved = int(classifier_inflight_batches)
+        if resolved < 1:
+            raise ValueError("classifier_inflight_batches must be >= 1 or 'auto'")
+        return resolved
+
+    def _classify_aggregate_batch_sync(
+        self,
+        batch_index: int,
+        representation_df: pd.DataFrame,
+        strain_names: np.ndarray,
+        app_threshold: float,
+        min_nkill: int,
+    ) -> Dict[str, Any]:
+        classifier_stage_start = time.perf_counter()
+
+        expand_start = time.perf_counter()
+        x_input_values = self._strain_feature_array(representation_df)
+        strain_expand_seconds = time.perf_counter() - expand_start
+
+        classifier_batch_start = time.perf_counter()
+        y_pred = self.model.predict_proba(x_input_values)
+        classifier_batch_seconds = time.perf_counter() - classifier_batch_start
+
+        y_pred_array = np.asarray(y_pred)
+        probability_values = y_pred_array[:, 1]
+
+        growth_inhibition_start = time.perf_counter()
+        chem_ids = representation_df.index.astype(str).to_numpy(copy=False)
+        probability_matrix = probability_values.reshape(len(chem_ids), len(strain_names))
+        growth_inhibition_matrix = (probability_matrix >= app_threshold).astype(np.int64, copy=False)
+        growth_inhibition_seconds = time.perf_counter() - growth_inhibition_start
+
+        aggregate_scores_start = time.perf_counter()
+        batch_agg_df = self._aggregate_scores_from_matrix(
+            probability_matrix=probability_matrix,
+            growth_inhibition_matrix=growth_inhibition_matrix,
+            chem_ids=chem_ids,
+            strain_names=strain_names,
+        )
+        batch_agg_df["broad_spectrum"] = (
+            batch_agg_df["ginhib_total"].to_numpy(copy=False) >= min_nkill
+        ).astype(np.int64, copy=False)
+        aggregate_batch_seconds = time.perf_counter() - aggregate_scores_start
+        classifier_stage_total_seconds = time.perf_counter() - classifier_stage_start
+
+        return {
+            "batch_index": batch_index,
+            "agg_df": batch_agg_df,
+            "profiling": {
+                "strain_expand_seconds": strain_expand_seconds,
+                "xgboost_seconds": classifier_batch_seconds,
+                "prediction_frame_seconds": 0.0,
+                "growth_inhibition_seconds": growth_inhibition_seconds,
+                "aggregate_scores_seconds": aggregate_batch_seconds,
+                "classifier_stage_seconds": classifier_stage_total_seconds,
+                "classifier_batch_inference_seconds": classifier_batch_seconds,
+                "classifier_batch_stage_seconds": classifier_stage_total_seconds,
+                "aggregate_accumulate_seconds": aggregate_batch_seconds,
+            },
+        }
+
+    def _collect_classifier_batch_results(
+        self,
+        pending_batches: Dict[Future[Dict[str, Any]], Dict[str, Any]],
+        aggregate_batches_by_index: Dict[int, pd.DataFrame],
+        streaming_batches_by_index: Dict[int, Dict[str, Any]],
+        wait_for_result: bool,
+        pipeline_start: float,
+        enable_profiling: bool,
+        first_result_latency_seconds: Optional[float],
+        strain_expand_seconds: float,
+        xgboost_seconds: float,
+        growth_inhibition_seconds: float,
+        aggregate_scores_seconds: float,
+        classifier_stage_seconds: float,
+    ) -> tuple[Optional[float], float, float, float, float, float]:
+        if not pending_batches:
+            return (
+                first_result_latency_seconds,
+                strain_expand_seconds,
+                xgboost_seconds,
+                growth_inhibition_seconds,
+                aggregate_scores_seconds,
+                classifier_stage_seconds,
+            )
+
+        if wait_for_result:
+            done, _ = wait(tuple(pending_batches), return_when=FIRST_COMPLETED)
+        else:
+            done = {future for future in pending_batches if future.done()}
+            if not done:
+                return (
+                    first_result_latency_seconds,
+                    strain_expand_seconds,
+                    xgboost_seconds,
+                    growth_inhibition_seconds,
+                    aggregate_scores_seconds,
+                    classifier_stage_seconds,
+                )
+
+        for future in done:
+            metadata = pending_batches.pop(future)
+            batch_result = future.result()
+            batch_index = int(batch_result["batch_index"])
+            aggregate_batches_by_index[batch_index] = batch_result["agg_df"]
+
+            batch_profile = batch_result["profiling"]
+            strain_expand_seconds += float(batch_profile["strain_expand_seconds"])
+            xgboost_seconds += float(batch_profile["xgboost_seconds"])
+            growth_inhibition_seconds += float(batch_profile["growth_inhibition_seconds"])
+            aggregate_scores_seconds += float(batch_profile["aggregate_scores_seconds"])
+            classifier_stage_seconds += float(batch_profile["classifier_stage_seconds"])
+
+            if first_result_latency_seconds is None:
+                first_result_latency_seconds = time.perf_counter() - pipeline_start
+
+            if enable_profiling:
+                streaming_batches_by_index[batch_index] = {
+                    "batch_index": batch_index,
+                    "chem_ids": list(metadata["chem_ids"]),
+                    "representation_batch_production_seconds": metadata[
+                        "representation_batch_production_seconds"
+                    ],
+                    "classifier_batch_inference_seconds": batch_profile[
+                        "classifier_batch_inference_seconds"
+                    ],
+                    "classifier_batch_stage_seconds": batch_profile[
+                        "classifier_batch_stage_seconds"
+                    ],
+                    "aggregate_accumulate_seconds": batch_profile[
+                        "aggregate_accumulate_seconds"
+                    ],
+                }
+
+        return (
+            first_result_latency_seconds,
+            strain_expand_seconds,
+            xgboost_seconds,
+            growth_inhibition_seconds,
+            aggregate_scores_seconds,
+            classifier_stage_seconds,
+        )
 
     async def predict(
         self,
@@ -599,6 +814,8 @@ class AntimicrobialPredictor:
         already_normalized: bool = False,
         enable_profiling: bool = False,
         deterministic_representation: bool = False,
+        classifier_workers: int | str = DEFAULT_CLASSIFIER_WORKERS,
+        classifier_inflight_batches: int | str = DEFAULT_CLASSIFIER_INFLIGHT_BATCHES,
     ) -> List[Dict[str, Any]]:
         """Predict antimicrobial activity and return items only."""
         if not self._model_loaded:
@@ -621,6 +838,8 @@ class AntimicrobialPredictor:
                 prefetch_batches,
                 enable_profiling,
                 deterministic_representation,
+                classifier_workers,
+                classifier_inflight_batches,
             )
 
             if enable_profiling:
