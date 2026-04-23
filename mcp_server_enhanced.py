@@ -12,7 +12,7 @@ from fastmcp import FastMCP
 from pydantic import Field
 
 from src.models import MoleculeInput
-from src.service import get_predictor
+from src.service import get_predictor, get_scheduler
 
 mcp = FastMCP("mole-antimicrobial-prediction")
 
@@ -89,14 +89,16 @@ async def predict_antimicrobial_potential(
         aggregate_scores=aggregate_scores,
         app_threshold=app_threshold,
         min_nkill=min_nkill,
-    ).normalize()
+    )
 
-    predictor = get_predictor()
-    await predictor.ensure_loaded()
-    items = await predictor.predict(input_data)
+    scheduler = get_scheduler()
+    items = await scheduler.predict_molecules(
+        input_data=input_data,
+    )
 
     latency_ms = int((time.monotonic() - start_time) * 1000)
-    status_info = predictor.get_status()
+    # Status comes from predictor
+    status_info = get_predictor().get_status()
 
     return {
         "mode": "aggregate" if input_data.aggregate_scores else "per_strain",

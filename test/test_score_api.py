@@ -52,10 +52,38 @@ class FakePredictor:
         return items
 
 
+class FakeScheduler:
+    def __init__(self, predictor):
+        self._predictor = predictor
+
+    async def predict_molecules(
+        self,
+        molecules=None,
+        aggregate_scores=None,
+        app_threshold=None,
+        min_nkill=None,
+        input_data=None,
+        already_normalized=False,
+        **kwargs,
+    ):
+        from src.models import MoleculeInput
+
+        if input_data is not None:
+            inp = input_data if already_normalized else input_data.normalize()
+        else:
+            inp = MoleculeInput(
+                molecules=molecules,
+                aggregate_scores=aggregate_scores,
+                app_threshold=app_threshold,
+                min_nkill=min_nkill,
+            )
+        return await self._predictor.predict(inp)
+
 class ScoreApiTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.predictor = FakePredictor()
-        self.patcher = patch("api_server.get_predictor", return_value=self.predictor)
+        self.scheduler = FakeScheduler(self.predictor)
+        self.patcher = patch("api_server.get_scheduler", return_value=self.scheduler)
         self.patcher.start()
         self.client = TestClient(api_server.app)
 

@@ -17,10 +17,12 @@ import torch
 
 from src.batch_screening import screen_path
 from src.mole_representation import process_representation
+from src.preprocess_screening_input import preprocess_to_parquet
+from scripts.benchmark_screening_inputs import benchmark_paths
 from src.models import MoleculeInput, ReinventScoreRequest, ScoreObjective
 from src.reinvent4_workflow import load_objective_spec, resolve_path
 from src.reinvent_scoring import score_reinvent_predictions
-from src.service import get_predictor
+from src.service import get_predictor, get_scheduler, create_scheduler
 from src.classifier_backend import inspect_classifier_backends
 from src.site_reward import scaffold_from_file
 
@@ -76,6 +78,12 @@ def _write_tsv(df: pd.DataFrame, path: Path) -> None:
     path.write_text(df.to_csv(sep="\t", index=False), encoding="utf-8")
 
 
+def _apply_classifier_backend_arg(args: argparse.Namespace) -> None:
+    backend = getattr(args, "classifier_backend", None)
+    if backend:
+        os.environ["MOLE_CLASSIFIER_BACKEND"] = backend
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mole", description="Unified MolE / Timber / REINVENT4 CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -107,6 +115,11 @@ def _build_parser() -> argparse.ArgumentParser:
     embed.add_argument("--chem-id", nargs="+", action="extend", dest="chem_ids", help="Optional chemical identifiers")
     embed.add_argument("--mole-model", default=DEFAULT_MOLE_MODEL, help="MolE checkpoint directory")
     embed.add_argument("--device", default="auto", help="MolE device: auto, cpu, cuda, or cuda:<index>")
+    embed.add_argument(
+        "--deterministic-representation",
+        action="store_true",
+        help="Force deterministic CUDA MolE forward passes for reproducibility checks.",
+    )
     embed.add_argument("--output", help="Optional output file path")
     embed.add_argument("--format", choices=["json", "tsv"], default="json", help="Output format")
 
@@ -114,9 +127,61 @@ def _build_parser() -> argparse.ArgumentParser:
     predict.add_argument("--smiles", nargs="+", action="extend", required=True, help="One or more SMILES strings")
     predict.add_argument("--chem-id", nargs="+", action="extend", dest="chem_ids", help="Optional chemical identifiers")
     predict.add_argument("--aggregate-scores", action="store_true", help="Return aggregate antimicrobial scores")
+    predict.add_argument(
+        "--classifier-backend",
+        choices=["auto", "timber", "pickle"],
+        help="Classifier backend for strain probabilities. Use pickle for high-throughput screening.",
+    )
     predict.add_argument("--app-threshold", type=float, default=0.04374140128493309, help="Growth inhibition threshold")
     predict.add_argument("--min-nkill", type=int, default=10, help="Broad-spectrum threshold")
+    predict.add_argument(
+        "--num-graph-workers",
+        default="auto",
+        help="CPU workers used to build MolE graph mini-batches",
+    )
+    predict.add_argument(
+        "--graph-batch-size",
+        type=int,
+        default=1024,
+        help="Mini-batch size for MolE graph construction and forward passes",
+    )
+    predict.add_argument(
+        "--prefetch-batches",
+        type=int,
+        default=2,
+        help="Prefetched graph mini-batches per worker",
+    )
+    predict.add_argument(
+        "--profiling",
+        action="store_true",
+        help="Emit stage profiling for MolE graph build and prediction",
+    )
+    predict.add_argument(
+        "--deterministic-representation",
+        action="store_true",
+        help="Force deterministic CUDA MolE forward passes for reproducibility checks.",
+    )
     predict.add_argument("--output", help="Optional output file path")
+
+    preprocess = subparsers.add_parser(
+        "preprocess-screening-input",
+        help="Convert large CSV/TSV screening tables into Parquet shards",
+    )
+    preprocess.add_argument("--input-path", required=True, help="Path to a CSV/TSV input file")
+    preprocess.add_argument("--output-dir", required=True, help="Directory where Parquet shards will be written")
+    preprocess.add_argument("--smiles-colname", default="smiles", help="SMILES column name in the input file")
+    preprocess.add_argument("--chem-id-colname", default="chem_id", help="chem_id column name in the input file")
+    preprocess.add_argument("--source-group", default="input", help="Logical source group label for the output shards")
+    preprocess.add_argument("--rows-per-shard", type=int, default=100000, help="Rows per Parquet shard")
+    preprocess.add_argument("--row-group-size", type=int, default=4000, help="Parquet row group size")
+    preprocess.add_argument("--output", help="Optional path for writing the preprocessing manifest JSON")
+
+    benchmark = subparsers.add_parser(
+        "benchmark-screening-inputs",
+        help="Benchmark screening input formats",
+    )
+    benchmark.add_argument("--input-path", action="append", required=True, help="One or more input paths to benchmark")
+    benchmark.add_argument("--output", help="Optional path for writing benchmark JSON")
 
     screen = subparsers.add_parser(
         "screen",
@@ -144,6 +209,11 @@ def _build_parser() -> argparse.ArgumentParser:
     screen.add_argument("--sqlite-table", help="SQLite table name to read when input is a database file")
     screen.add_argument("--sqlite-query", help="SQLite query to read when input is a database file")
     screen.add_argument(
+        "--classifier-backend",
+        choices=["auto", "timber", "pickle"],
+        help="Classifier backend for strain probabilities. Use pickle for high-throughput screening.",
+    )
+    screen.add_argument(
         "--no-dedupe-smiles",
         dest="dedupe_smiles",
         action="store_false",
@@ -166,7 +236,73 @@ def _build_parser() -> argparse.ArgumentParser:
     screen.set_defaults(aggregate_scores=True)
     screen.add_argument("--app-threshold", type=float, default=0.04374140128493309, help="Growth inhibition threshold")
     screen.add_argument("--min-nkill", type=int, default=10, help="Broad-spectrum threshold")
-    screen.add_argument("--chunk-size", type=int, default=256, help="Batch size used while scoring")
+
+    tune_group = screen.add_argument_group("Tuning")
+    tune_group.add_argument(
+        "--grouping-mode", default="auto", choices=["auto", "source", "chunk", "none"],
+        help="How to group input records (default: auto)"
+    )
+    tune_group.add_argument(
+        "--cpu-workers", default="auto",
+        help="Number of CPU workers for preprocessing (default: auto)"
+    )
+    tune_group.add_argument(
+        "--target-rows-per-group", default="auto",
+        help="Target number of rows per group for chunking (default: auto)"
+    )
+    tune_group.add_argument(
+        "--target-bytes-per-group", default="auto",
+        help="Target bytes per group for chunking in auto mode (default: auto)"
+    )
+    tune_group.add_argument(
+        "--input-chunk-size", "--chunk-size", type=int, default=10000, dest="input_chunk_size",
+        help="Rows generated per chunk while reading inputs (default 10000)"
+    )
+    tune_group.add_argument(
+        "--max-batch-size", type=int, default=16384,
+        help="Hard cap on GPU batch size"
+    )
+    tune_group.add_argument(
+        "--target-gpu-memory-fraction", type=float, default=0.8,
+        help="Fraction of free VRAM to fill"
+    )
+    tune_group.add_argument(
+        "--prefetch-queue-size", default="auto",
+        help="Number of pre-normalized batches to queue for GPU"
+    )
+    tune_group.add_argument(
+        "--num-graph-workers",
+        default="auto",
+        help="CPU workers used to build MolE graph mini-batches",
+    )
+    tune_group.add_argument(
+        "--graph-batch-size",
+        type=int,
+        default=1024,
+        help="Mini-batch size for MolE graph construction and forward passes",
+    )
+    tune_group.add_argument(
+        "--prefetch-batches",
+        type=int,
+        default=2,
+        help="Prefetched graph mini-batches per worker",
+    )
+    tune_group.add_argument(
+        "--deterministic-representation",
+        action="store_true",
+        help="Force deterministic CUDA MolE forward passes for reproducibility checks.",
+    )
+    tune_group.add_argument(
+        "--prediction-row-budget",
+        type=int,
+        default=8192,
+        help="Combine consecutive ready screening chunks into prediction calls up to this many rows",
+    )
+    tune_group.add_argument(
+        "--profiling",
+        action="store_true",
+        help="Write stage profiling into manifest.json for screening runs",
+    )
 
     score = subparsers.add_parser("score", help="Compute REINVENT4 rewards from MolE probabilities")
     score.add_argument("--objective-file", required=True, help="Path to a normalized objective JSON file")
@@ -290,14 +426,20 @@ def _command_embed(args: argparse.Namespace) -> int:
         id_column_str="chem_id",
         pretrained_dir=args.mole_model,
         device=device,
+        deterministic_representation=bool(getattr(args, "deterministic_representation", False)),
     ).reset_index(drop=False)
     _write_embedding_output(representation, args.output, args.format)
     return 0
 
 
 async def _predict_async(args: argparse.Namespace) -> dict[str, Any]:
-    predictor = get_predictor()
-    await predictor.ensure_loaded()
+    _apply_classifier_backend_arg(args)
+    scheduler = get_scheduler(
+        num_graph_workers=getattr(args, "num_graph_workers", "auto"),
+        graph_batch_size=int(getattr(args, "graph_batch_size", 1024)),
+        prefetch_batches=int(getattr(args, "prefetch_batches", 2)),
+        deterministic_representation=bool(getattr(args, "deterministic_representation", False)),
+    )
     normalized = MoleculeInput(
         smiles=list(args.smiles),
         chem_id=list(args.chem_ids) if args.chem_ids is not None else None,
@@ -305,10 +447,21 @@ async def _predict_async(args: argparse.Namespace) -> dict[str, Any]:
         app_threshold=float(args.app_threshold),
         min_nkill=int(args.min_nkill),
     ).normalize()
-    items = await predictor.predict(normalized)
+    items = await scheduler.predict_molecules(
+        molecules=normalized.molecules,
+        aggregate_scores=normalized.aggregate_scores,
+        app_threshold=normalized.app_threshold,
+        min_nkill=normalized.min_nkill,
+        num_graph_workers=getattr(args, "num_graph_workers", "auto"),
+        graph_batch_size=int(getattr(args, "graph_batch_size", 1024)),
+        prefetch_batches=int(getattr(args, "prefetch_batches", 2)),
+        enable_profiling=bool(getattr(args, "profiling", False)),
+        deterministic_representation=bool(getattr(args, "deterministic_representation", False)),
+    )
     return {
         "mode": "aggregate" if normalized.aggregate_scores else "per_strain",
         "items": items,
+        "prediction_runtime": scheduler.runtime_snapshot(),
     }
 
 
@@ -318,10 +471,44 @@ def _command_predict(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_preprocess_screening_input(args: argparse.Namespace) -> int:
+    manifest = preprocess_to_parquet(
+        input_path=args.input_path,
+        output_dir=args.output_dir,
+        smiles_colname=args.smiles_colname,
+        chem_id_colname=args.chem_id_colname,
+        source_group=args.source_group,
+        rows_per_shard=int(args.rows_per_shard),
+        row_group_size=int(args.row_group_size),
+    )
+    _dump_json(manifest, getattr(args, "output", None))
+    return 0
+
+
+def _command_benchmark_screening_inputs(args: argparse.Namespace) -> int:
+    result = benchmark_paths(list(args.input_path))
+    _dump_json(result, getattr(args, "output", None))
+    return 0
+
+
 def _command_screen(args: argparse.Namespace) -> int:
     async def _run() -> dict[str, Any]:
-        frame, predicted = await screen_path(
+        _apply_classifier_backend_arg(args)
+        scheduler = create_scheduler(
+            max_batch_size=getattr(args, "max_batch_size", 2048),
+            target_memory_fraction=getattr(args, "target_gpu_memory_fraction", 0.8),
+            num_graph_workers=getattr(args, "num_graph_workers", "auto"),
+            graph_batch_size=int(getattr(args, "graph_batch_size", 1024)),
+            prefetch_batches=int(getattr(args, "prefetch_batches", 2)),
+            deterministic_representation=bool(getattr(args, "deterministic_representation", False)),
+        )
+
+        output_dir = Path(args.output_dir).expanduser().resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        summary = await screen_path(
             input_path=args.input_path,
+            output_dir=output_dir,
             smiles_colname=getattr(args, "smiles_colname", "smiles"),
             chem_id_colname=getattr(args, "chem_id_colname", "chem_id"),
             archive_pattern=getattr(args, "archive_pattern", "*_scheme_b_unique_products.csv"),
@@ -333,46 +520,19 @@ def _command_screen(args: argparse.Namespace) -> int:
             aggregate_scores=bool(getattr(args, "aggregate_scores", True)),
             app_threshold=float(getattr(args, "app_threshold", 0.04374140128493309)),
             min_nkill=int(getattr(args, "min_nkill", 10)),
-            chunk_size=int(getattr(args, "chunk_size", 256)),
+            chunk_size=int(getattr(args, "input_chunk_size", 10000)),
+            prefetch_queue_size=getattr(args, "prefetch_queue_size", "auto"),
+            grouping_mode=getattr(args, "grouping_mode", "auto"),
+            cpu_workers=getattr(args, "cpu_workers", "auto"),
+            target_rows_per_group=getattr(args, "target_rows_per_group", "auto"),
+            target_bytes_per_group=getattr(args, "target_bytes_per_group", "auto"),
+            scheduler=scheduler,
+            num_graph_workers=getattr(args, "num_graph_workers", "auto"),
+            graph_batch_size=int(getattr(args, "graph_batch_size", 1024)),
+            prefetch_batches=int(getattr(args, "prefetch_batches", 2)),
+            enable_profiling=bool(getattr(args, "profiling", False)),
+            prediction_row_budget=int(getattr(args, "prediction_row_budget", 8192)),
         )
-
-        if bool(getattr(args, "aggregate_scores", True)):
-            rank_columns: list[str] = []
-            ascending: list[bool] = []
-            if "broad_spectrum" in predicted.columns:
-                rank_columns.append("broad_spectrum")
-                ascending.append(False)
-            if "ginhib_total" in predicted.columns:
-                rank_columns.append("ginhib_total")
-                ascending.append(False)
-            if "apscore_total" in predicted.columns:
-                rank_columns.append("apscore_total")
-                ascending.append(True)
-            if "input_order" in predicted.columns:
-                rank_columns.append("input_order")
-                ascending.append(True)
-            if rank_columns:
-                predicted = predicted.sort_values(rank_columns, ascending=ascending, kind="stable")
-        else:
-            rank_columns = [column for column in ["input_order", "strain_name"] if column in predicted.columns]
-            if rank_columns:
-                predicted = predicted.sort_values(rank_columns, kind="stable")
-
-        output_dir = Path(args.output_dir).expanduser().resolve()
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        normalized_input_path = output_dir / "normalized_input.tsv"
-        predictions_all_path = output_dir / "predictions_all.tsv"
-        _write_tsv(frame, normalized_input_path)
-        _write_tsv(predicted, predictions_all_path)
-
-        grouped_outputs: list[dict[str, str]] = []
-        if "source_group" in predicted.columns:
-            for source_group, group_frame in predicted.groupby("source_group", sort=True):
-                group_dir = output_dir / "by_source" / str(source_group)
-                group_path = group_dir / "predictions.tsv"
-                _write_tsv(group_frame, group_path)
-                grouped_outputs.append({"source_group": str(source_group), "path": str(group_path)})
 
         manifest = {
             "input_path": str(Path(args.input_path).expanduser().resolve()),
@@ -381,12 +541,23 @@ def _command_screen(args: argparse.Namespace) -> int:
             "aggregate_scores": bool(args.aggregate_scores),
             "app_threshold": float(args.app_threshold),
             "min_nkill": int(args.min_nkill),
-            "chunk_size": int(args.chunk_size),
-            "normalized_rows": int(len(frame)),
-            "predicted_rows": int(len(predicted)),
-            "normalized_input": str(normalized_input_path),
-            "predictions_all": str(predictions_all_path),
-            "grouped_outputs": grouped_outputs,
+            "input_chunk_size": int(getattr(args, "input_chunk_size", 10000)),
+            "normalized_rows": summary.normalized_rows,
+            "predicted_rows": summary.predicted_rows,
+            "normalized_input": str(summary.normalized_input_path),
+            "predictions_all": str(summary.predictions_all_path),
+            "grouped_outputs": summary.grouped_outputs,
+            "grouping_mode": summary.grouping_mode,
+            "cpu_workers_selected": summary.cpu_workers_selected,
+            "prefetch_queue_size_selected": summary.prefetch_queue_size_selected,
+            "work_unit_count": summary.work_unit_count,
+            "target_rows_per_group": summary.target_rows_per_group,
+            "target_bytes_per_group": summary.target_bytes_per_group,
+            "prediction_row_budget": int(getattr(args, "prediction_row_budget", 8192)),
+            "deterministic_representation": bool(getattr(args, "deterministic_representation", False)),
+            "classifier_backend": getattr(args, "classifier_backend", None) or os.environ.get("MOLE_CLASSIFIER_BACKEND", "auto"),
+            "profiling": summary.profiling,
+            "prediction_runtime": scheduler.runtime_snapshot(),
         }
         (output_dir / "manifest.json").write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
@@ -425,10 +596,14 @@ def _command_score(args: argparse.Namespace) -> int:
     )
 
     async def _run() -> dict[str, Any]:
-        predictor = get_predictor()
-        await predictor.ensure_loaded()
-        raw_items = await predictor.predict(request.to_molecule_input())
-        scored_items = score_reinvent_predictions(raw_items, request)
+        scheduler = get_scheduler()
+        items = await scheduler.predict_molecules(
+            molecules=request.to_molecule_input().molecules,
+            aggregate_scores=False,
+            app_threshold=request.app_threshold,
+            min_nkill=request.min_nkill,
+        )
+        scored_items = score_reinvent_predictions(items, request)
         return {
             "mode": "reinvent_score",
             "objective": {
@@ -489,6 +664,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _command_embed(args)
     if args.command == "predict":
         return _command_predict(args)
+    if args.command == "preprocess-screening-input":
+        return _command_preprocess_screening_input(args)
+    if args.command == "benchmark-screening-inputs":
+        return _command_benchmark_screening_inputs(args)
     if args.command == "screen":
         return _command_screen(args)
     if args.command == "score":

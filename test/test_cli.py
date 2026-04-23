@@ -21,6 +21,48 @@ class MoleCliTestCase(unittest.TestCase):
             parser.parse_args(["score", "--objective-file", "x.json", "--smiles", "CCO"]).command,
             "score",
         )
+        self.assertEqual(
+            parser.parse_args(["benchmark-screening-inputs", "--input-path", "input.csv"]).command,
+            "benchmark-screening-inputs",
+        )
+
+    def test_parser_accepts_graph_construction_tuning_flags(self):
+        parser = mole_cli._build_parser()
+        args = parser.parse_args(
+            [
+                "predict",
+                "--smiles",
+                "CCO",
+                "--num-graph-workers",
+                "3",
+                "--graph-batch-size",
+                "128",
+                "--prefetch-batches",
+                "4",
+                "--deterministic-representation",
+                "--classifier-backend",
+                "pickle",
+            ]
+        )
+        self.assertEqual(args.num_graph_workers, "3")
+        self.assertEqual(args.graph_batch_size, 128)
+        self.assertEqual(args.prefetch_batches, 4)
+        self.assertTrue(args.deterministic_representation)
+        self.assertEqual(args.classifier_backend, "pickle")
+
+    def test_parser_accepts_profiling_flags(self):
+        parser = mole_cli._build_parser()
+        predict_args = parser.parse_args(["predict", "--smiles", "CCO", "--profiling"])
+        screen_args = parser.parse_args(["screen", "--input-path", "x.tsv", "--output-dir", "out", "--profiling"])
+        self.assertTrue(predict_args.profiling)
+        self.assertTrue(screen_args.profiling)
+
+    def test_parser_accepts_prediction_row_budget(self):
+        parser = mole_cli._build_parser()
+        args = parser.parse_args(
+            ["screen", "--input-path", "x.tsv", "--output-dir", "out", "--prediction-row-budget", "8192"]
+        )
+        self.assertEqual(args.prediction_row_budget, 8192)
 
     def test_doctor_reports_ok_when_fake_probe_is_available(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -127,6 +169,63 @@ class MoleCliTestCase(unittest.TestCase):
 
             self.assertEqual(captured["scaffold_smiles"], scaffold.read_text(encoding="utf-8").strip())
             self.assertEqual(captured["mode"], "single_strain")
+
+    def test_command_benchmark_screening_inputs_dumps_benchmark_json(self):
+        args = SimpleNamespace(
+            input_path=["/tmp/input_a.csv", "/tmp/input_b.parquet"],
+            output=None,
+        )
+        expected = {
+            "benchmarks": [
+                {
+                    "input_path": "/tmp/input_a.csv",
+                    "elapsed_seconds": 0.01,
+                    "size_bytes": 128,
+                }
+            ]
+        }
+
+        with mock.patch.object(mole_cli, "benchmark_paths", return_value=expected) as benchmark_mock, mock.patch.object(
+            mole_cli, "_dump_json"
+        ) as dump_mock:
+            exit_code = mole_cli._command_benchmark_screening_inputs(args)
+
+        self.assertEqual(exit_code, 0)
+        benchmark_mock.assert_called_once_with(args.input_path)
+        dump_mock.assert_called_once_with(expected, None)
+
+    def test_predict_async_threads_graph_construction_settings(self):
+        fake_scheduler = SimpleNamespace(
+            predict_molecules=mock.AsyncMock(
+                return_value=[{"chem_id": "mol1", "apscore_total": -1.2}]
+            ),
+            runtime_snapshot=mock.Mock(return_value={"device": "cpu"}),
+        )
+        args = SimpleNamespace(
+            smiles=["CCO"],
+            chem_ids=["mol1"],
+            aggregate_scores=True,
+            app_threshold=0.04374140128493309,
+            min_nkill=10,
+            num_graph_workers="3",
+            graph_batch_size=128,
+            prefetch_batches=4,
+            deterministic_representation=True,
+            classifier_backend="pickle",
+        )
+
+        with mock.patch.object(mole_cli, "get_scheduler", return_value=fake_scheduler), mock.patch.dict(
+            mole_cli.os.environ, {}, clear=False
+        ):
+            payload = mole_cli.asyncio_run(mole_cli._predict_async(args))
+            self.assertEqual(mole_cli.os.environ["MOLE_CLASSIFIER_BACKEND"], "pickle")
+
+        _, kwargs = fake_scheduler.predict_molecules.call_args
+        self.assertEqual(kwargs["num_graph_workers"], "3")
+        self.assertEqual(kwargs["graph_batch_size"], 128)
+        self.assertEqual(kwargs["prefetch_batches"], 4)
+        self.assertTrue(kwargs["deterministic_representation"])
+        self.assertEqual(payload["items"], [{"chem_id": "mol1", "apscore_total": -1.2}])
 
 
 if __name__ == "__main__":  # pragma: no cover

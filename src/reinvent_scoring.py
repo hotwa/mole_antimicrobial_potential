@@ -147,6 +147,7 @@ def _apply_site_reward(
 def score_reinvent_predictions(
     raw_items: Sequence[Mapping[str, Any]],
     request: ReinventScoreRequest,
+    smiles_by_chem_id: Mapping[str, str] | None = None,
 ) -> List[Dict[str, Any]]:
     """
     Convert per-strain predictions into continuous REINVENT4 rewards.
@@ -155,10 +156,14 @@ def score_reinvent_predictions(
     """
 
     grouped = _parse_predictions(raw_items)
-    smiles_by_chem_id = {
-        molecule.chem_id: molecule.smiles
-        for molecule in request.to_molecule_input().molecules or []
-    }
+    resolved_smiles_by_chem_id = (
+        dict(smiles_by_chem_id)
+        if smiles_by_chem_id is not None
+        else {
+            molecule.chem_id: molecule.smiles
+            for molecule in request.to_molecule_input().molecules or []
+        }
+    )
     scored_items: List[Dict[str, Any]] = []
 
     for chem_id, probabilities in grouped.items():
@@ -177,7 +182,7 @@ def score_reinvent_predictions(
                 panel=panel,
                 request=request,
             )
-        smiles = smiles_by_chem_id.get(chem_id)
+        smiles = resolved_smiles_by_chem_id.get(chem_id)
         if smiles is None:
             raise ValueError(f"Missing input SMILES for chem_id={chem_id}")
         scored = _apply_site_reward(scored, smiles, request.objective)

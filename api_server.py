@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException
 
 from src.models import MoleculeInput, ReinventScoreRequest
 from src.reinvent_scoring import score_reinvent_predictions
-from src.service import get_predictor
+from src.service import get_predictor, get_scheduler
 
 app = FastAPI(title="Antimicrobial Prediction API")
 
@@ -29,17 +29,17 @@ async def health() -> dict:
 @app.post("/predict")
 async def predict(input_data: MoleculeInput) -> dict:
     try:
-        normalized = input_data.normalize()
-        predictor = get_predictor()
-        await predictor.ensure_loaded()
-        items = await predictor.predict(normalized)
+        scheduler = get_scheduler()
+        items = await scheduler.predict_molecules(
+            input_data=input_data,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return {
-        "mode": "aggregate" if normalized.aggregate_scores else "per_strain",
+        "mode": "aggregate" if input_data.aggregate_scores else "per_strain",
         "items": items,
     }
 
@@ -49,10 +49,20 @@ async def score(input_data: ReinventScoreRequest) -> dict:
     try:
         input_data.objective.validate_configuration()
         normalized = input_data.to_molecule_input()
-        predictor = get_predictor()
-        await predictor.ensure_loaded()
-        raw_items = await predictor.predict(normalized)
-        items = score_reinvent_predictions(raw_items, input_data)
+        smiles_by_chem_id = {
+            molecule.chem_id: molecule.smiles
+            for molecule in normalized.molecules or []
+        }
+        scheduler = get_scheduler()
+        raw_items = await scheduler.predict_molecules(
+            input_data=normalized,
+            already_normalized=True,
+        )
+        items = score_reinvent_predictions(
+            raw_items,
+            input_data,
+            smiles_by_chem_id=smiles_by_chem_id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
