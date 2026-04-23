@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase
@@ -89,6 +90,21 @@ class PredictorMolEModelCacheTestCase(TestCase):
         self.assertEqual(process_mock.call_count, 2)
         for call in process_mock.call_args_list:
             self.assertIs(call.kwargs["model"], fake_model)
+
+    def test_predictor_uses_cuda_zero_inside_masked_process(self) -> None:
+        fake_probe = SimpleNamespace(
+            preference="pickle",
+            pickle_path=Path("/tmp/fake_model.pkl"),
+            timber_model_dir=Path("/tmp/fake_timber"),
+        )
+
+        with patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "1"}, clear=False), patch(
+            "src.predictor.inspect_classifier_backends",
+            return_value=fake_probe,
+        ), patch("src.predictor.torch.cuda.is_available", return_value=True):
+            predictor = AntimicrobialPredictor()
+
+        self.assertEqual(predictor.device, "cuda:0")
 
     def test_representation_settings_are_forwarded_to_process_representation(self) -> None:
         predictor = self._build_predictor()

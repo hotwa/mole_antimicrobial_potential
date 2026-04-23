@@ -50,13 +50,13 @@ class AntimicrobialPredictor:
     """Predict antimicrobial activity with lazy async loading."""
 
     def __init__(self) -> None:
-        # 动态选择 GPU，根据 CUDA_VISIBLE_DEVICES
+        # Respect CUDA_VISIBLE_DEVICES remapping. In a one-process-per-GPU
+        # launch pattern the selected device inside the masked process is
+        # always cuda:0, regardless of the original physical GPU index.
         if torch.cuda.is_available():
             cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
             if cuda_visible:
-                # 取第一个可用的 GPU
-                gpu_id = cuda_visible.split(",")[0].strip()
-                self.device = f"cuda:{gpu_id}"
+                self.device = "cuda:0"
             else:
                 self.device = "cuda:0"
         else:
