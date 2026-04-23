@@ -647,12 +647,32 @@ class AntimicrobialPredictor:
 
     def _resolve_classifier_workers(self, classifier_workers: int | str) -> int:
         if classifier_workers == "auto":
-            return 1
+            if self._classifier_backend_name() == "timber":
+                return 1
+
+            cpu_count = self._available_cpu_count()
+            return max(1, min(8, (cpu_count // 4) or 1))
 
         resolved = int(classifier_workers)
         if resolved < 1:
             raise ValueError("classifier_workers must be >= 1 or 'auto'")
         return resolved
+
+    def _classifier_backend_name(self) -> Optional[str]:
+        if self.model is not None and hasattr(self.model, "status"):
+            try:
+                return self.model.status().backend
+            except Exception:
+                pass
+        return getattr(self.classifier_backend_probe, "selected_backend", None)
+
+    def _available_cpu_count(self) -> int:
+        if hasattr(os, "sched_getaffinity"):
+            try:
+                return max(1, len(os.sched_getaffinity(0)))
+            except OSError:
+                pass
+        return os.cpu_count() or 1
 
     def _resolve_classifier_inflight_batches(
         self,
