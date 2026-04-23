@@ -18,6 +18,10 @@ import torch
 from src.batch_screening import screen_path
 from src.mole_representation import process_representation
 from src.preprocess_screening_input import preprocess_to_parquet
+from src.stream_enumeration_screen import (
+    DEFAULT_SCAFFOLD_FILE as DEFAULT_STREAM_SCAFFOLD_FILE,
+    stream_enumeration_screen,
+)
 from scripts.benchmark_screening_inputs import benchmark_paths
 from src.models import MoleculeInput, ReinventScoreRequest, ScoreObjective
 from src.reinvent4_workflow import load_objective_spec, resolve_path
@@ -304,6 +308,61 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Write stage profiling into manifest.json for screening runs",
     )
 
+    stream = subparsers.add_parser(
+        "stream-enumeration-screen",
+        help="Enumerate scaffold/fragment combinations on the fly and persist only hit shards",
+    )
+    stream.add_argument("--output-dir", required=True, help="Directory where run_state, manifest, and hit shards are written")
+    scaffold_group = stream.add_mutually_exclusive_group()
+    scaffold_group.add_argument(
+        "--scaffold-file",
+        help=f"Single scaffold .smi file to enumerate (default: {DEFAULT_STREAM_SCAFFOLD_FILE})",
+    )
+    scaffold_group.add_argument("--scaffold-dir", help="Directory of scaffold .smi files for multi-scaffold runs")
+    scaffold_group.add_argument("--scaffold-catalog", help="CSV/TSV catalog with scaffold_slug and scaffold_smiles/scaffold_file")
+    stream.add_argument("--ordinary-library", required=True, help="CSV containing the shared ordinary fragment pool")
+    stream.add_argument("--pos13-library", required=True, help="CSV containing the position-13 sugar fragment pool")
+    stream.add_argument("--run-state", dest="run_state_source", help="Optional upstream run_state.json for provenance")
+    stream.add_argument("--chunk-manifest", dest="chunk_manifest_source", help="Optional upstream chunk manifest for provenance")
+    stream.add_argument("--start-index", type=int, default=0, help="Inclusive global combination start index")
+    stream.add_argument("--stop-index", type=int, help="Exclusive global combination stop index")
+    stream.add_argument("--shard-size", type=int, default=100000, help="Combinations per resumable shard")
+    stream.add_argument("--prediction-batch-size", type=int, default=1024, help="Combinations per prediction call inside a shard")
+    stream.add_argument(
+        "--classifier-backend",
+        choices=["auto", "timber", "pickle"],
+        help="Classifier backend for aggregate screening predictions.",
+    )
+    stream.add_argument("--app-threshold", type=float, default=0.04374140128493309, help="Growth inhibition threshold")
+    stream.add_argument("--min-nkill", type=int, default=10, help="Broad-spectrum threshold")
+    stream.add_argument(
+        "--num-graph-workers",
+        default="auto",
+        help="CPU workers used to build MolE graph mini-batches",
+    )
+    stream.add_argument(
+        "--graph-batch-size",
+        type=int,
+        default=1024,
+        help="Mini-batch size for MolE graph construction and forward passes",
+    )
+    stream.add_argument(
+        "--prefetch-batches",
+        type=int,
+        default=2,
+        help="Prefetched graph mini-batches per worker",
+    )
+    stream.add_argument(
+        "--deterministic-representation",
+        action="store_true",
+        help="Force deterministic CUDA MolE forward passes for reproducibility checks.",
+    )
+    stream.add_argument(
+        "--profiling",
+        action="store_true",
+        help="Enable prediction profiling while screening enumerated combinations",
+    )
+
     score = subparsers.add_parser("score", help="Compute REINVENT4 rewards from MolE probabilities")
     score.add_argument("--objective-file", required=True, help="Path to a normalized objective JSON file")
     score.add_argument("--smiles", nargs="+", action="extend", required=True, help="One or more SMILES strings")
@@ -570,6 +629,56 @@ def _command_screen(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_stream_enumeration_screen(args: argparse.Namespace) -> int:
+    async def _run() -> dict[str, Any]:
+        _apply_classifier_backend_arg(args)
+        scheduler = create_scheduler(
+            num_graph_workers=getattr(args, "num_graph_workers", "auto"),
+            graph_batch_size=int(getattr(args, "graph_batch_size", 1024)),
+            prefetch_batches=int(getattr(args, "prefetch_batches", 2)),
+            deterministic_representation=bool(getattr(args, "deterministic_representation", False)),
+        )
+        summary = await stream_enumeration_screen(
+            output_dir=getattr(args, "output_dir"),
+            scaffold_file=getattr(args, "scaffold_file", None),
+            scaffold_dir=getattr(args, "scaffold_dir", None),
+            scaffold_catalog=getattr(args, "scaffold_catalog", None),
+            ordinary_library=getattr(args, "ordinary_library"),
+            pos13_library=getattr(args, "pos13_library"),
+            run_state_source=getattr(args, "run_state_source", None),
+            chunk_manifest_source=getattr(args, "chunk_manifest_source", None),
+            start_index=int(getattr(args, "start_index", 0)),
+            stop_index=getattr(args, "stop_index", None),
+            shard_size=int(getattr(args, "shard_size", 100000)),
+            prediction_batch_size=int(getattr(args, "prediction_batch_size", 1024)),
+            scheduler=scheduler,
+            app_threshold=float(getattr(args, "app_threshold", 0.04374140128493309)),
+            min_nkill=int(getattr(args, "min_nkill", 10)),
+            classifier_backend=getattr(args, "classifier_backend", None) or os.environ.get("MOLE_CLASSIFIER_BACKEND", "auto"),
+            num_graph_workers=getattr(args, "num_graph_workers", "auto"),
+            graph_batch_size=int(getattr(args, "graph_batch_size", 1024)),
+            prefetch_batches=int(getattr(args, "prefetch_batches", 2)),
+            deterministic_representation=bool(getattr(args, "deterministic_representation", False)),
+            enable_profiling=bool(getattr(args, "profiling", False)),
+        )
+        return {
+            "output_dir": str(summary.output_dir),
+            "run_state_path": str(summary.run_state_path),
+            "shard_manifest_path": str(summary.shard_manifest_path),
+            "attempted_count": summary.attempted_count,
+            "hit_count": summary.hit_count,
+            "completed_shards": summary.completed_shards,
+            "start_index": summary.start_index,
+            "stop_index": summary.stop_index,
+            "total_combinations": summary.total_combinations,
+            "prediction_runtime": scheduler.runtime_snapshot(),
+        }
+
+    payload = asyncio_run(_run())
+    _dump_json(payload, None)
+    return 0
+
+
 def _command_score(args: argparse.Namespace) -> int:
     objective_dict = load_objective_spec(args.objective_file)
     site_reward = objective_dict.get("site_reward")
@@ -670,6 +779,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _command_benchmark_screening_inputs(args)
     if args.command == "screen":
         return _command_screen(args)
+    if args.command == "stream-enumeration-screen":
+        return _command_stream_enumeration_screen(args)
     if args.command == "score":
         return _command_score(args)
     if args.command == "optimize":

@@ -66,6 +66,7 @@ workflow/logdir/**
 *.zip
 data/04.new_predictions/20*_screening/
 !data/04.new_predictions/README.md
+data/05.stream_tasks/**
 data/test_output/**
 workflows/reinvent4/results/tests/**
 !workflows/reinvent4/results/tests/README.md

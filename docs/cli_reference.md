@@ -21,8 +21,12 @@ This document covers the current canonical CLI commands:
 - `mole preprocess-screening-input`
 - `mole benchmark-screening-inputs`
 - `mole screen`
+- `mole stream-enumeration-screen`
 - `mole score`
 - `mole optimize`
+
+For production-scale streaming enumeration, also read
+[docs/stream_enumeration_screen_runbook.md](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/stream_enumeration_screen_runbook.md).
 
 ## Conventions
 
@@ -39,6 +43,7 @@ Important defaults:
 - `mole predict` defaults to `per-strain` output
 - `mole screen` defaults to `aggregate` output
 - `mole screen` supports CSV/TSV, Parquet files, Parquet directories, `tar` / `tar.gz`, and SQLite
+- `mole stream-enumeration-screen` writes only resumable hit shards and state files; it does not produce `predictions_all.tsv`
 - `--classifier-backend auto` currently prefers `pickle` when the pickle model is available, then falls back to `timber`
 - `--num-graph-workers 0` means no extra graph workers; graph construction stays in the main process and should not change prediction semantics for a fixed model/backend
 
@@ -334,6 +339,89 @@ pixi run mole screen \
   --num-graph-workers 0 \
   --graph-batch-size 1024 \
   --prediction-row-budget 8192
+```
+
+## `mole stream-enumeration-screen`
+
+### Purpose
+
+Enumerate scaffold/fragment combinations directly from scaffold and fragment
+libraries, predict aggregate antimicrobial scores in bounded batches, and
+persist only broad-spectrum hit shards plus resumable run state.
+
+### Default behavior
+
+- requires `--output-dir`, `--ordinary-library`, and `--pos13-library`
+- defaults to `workflows/reinvent4/inputs/scaffolds/mother_scaffold.template.smi`
+  when no explicit scaffold source is passed
+- uses deterministic index mapping:
+  `global_combination_index <-> (scaffold_idx, pos3_idx, pos4_idx, pos12_idx, pos13_idx)`
+- writes only:
+  - `run_state.json`
+  - `shard_manifest.jsonl`
+  - `hits/<shard_id>.parquet`
+- does not write `normalized_input.tsv` or `predictions_all.tsv`
+- skips completed shards on rerun and recomputes interrupted/failed shards from
+  the shard boundary
+
+### Parameters That Can Change Result Content
+
+| Parameter | Default | Meaning | Effect type |
+| --- | --- | --- | --- |
+| `--output-dir` | required | Output directory for run state, manifest, and hit shards | output |
+| `--scaffold-file` | `workflows/reinvent4/inputs/scaffolds/mother_scaffold.template.smi` | Single scaffold `.smi` file | content |
+| `--scaffold-dir` | unset | Directory of scaffold `.smi` files for multi-scaffold runs | content |
+| `--scaffold-catalog` | unset | CSV/TSV catalog with `scaffold_slug` and `scaffold_smiles` or `scaffold_file` | content |
+| `--ordinary-library` | required | Shared ordinary fragment library CSV for positions `3/4/12` | content |
+| `--pos13-library` | required | Position-13 fragment library CSV | content |
+| `--run-state` | unset | Optional upstream `run_state.json` copied into provenance | output |
+| `--chunk-manifest` | unset | Optional upstream chunk manifest preview copied into provenance | output |
+| `--start-index` | `0` | Inclusive global combination start index | content |
+| `--stop-index` | full resolved space | Exclusive global combination stop index | content |
+| `--classifier-backend` | env or `auto` | Backend selector: `auto`, `pickle`, `timber` | content |
+| `--app-threshold` | `0.04374140128493309` | Growth inhibition threshold | content |
+| `--min-nkill` | `10` | Broad-spectrum threshold | content |
+
+### Parameters That Primarily Affect Throughput or Scheduling
+
+| Parameter | Default | Meaning | Effect type |
+| --- | --- | --- | --- |
+| `--shard-size` | `100000` | Combinations per resumable shard | performance |
+| `--prediction-batch-size` | `1024` | Combinations per prediction call within a shard | performance |
+| `--num-graph-workers` | `auto` | CPU graph workers for the MolE pre-forward graph path | performance |
+| `--graph-batch-size` | `1024` | MolE graph / forward mini-batch size | performance |
+| `--prefetch-batches` | `2` | Prefetched graph mini-batches per graph worker | performance |
+| `--profiling` | disabled | Enable prediction profiling during streaming enumeration | performance |
+
+### Reproducibility Parameter
+
+| Parameter | Default | Meaning | Effect type |
+| --- | --- | --- | --- |
+| `--deterministic-representation` | disabled | Force deterministic CUDA MolE forward passes | reproducibility |
+
+### Resume semantics
+
+- `run_state.json` stores the current top-level status and the immutable
+  parameter snapshot for compatibility checks
+- `shard_manifest.jsonl` is the per-shard source of truth
+- hit shard writes are atomic: write temp parquet, rename, then update manifest
+- only `completed` shards with an existing hit parquet are skipped
+- `interrupted` / `failed` shards are recomputed from `start_idx`
+
+### Minimal example
+
+```bash
+pixi run mole stream-enumeration-screen \
+  --output-dir data/05.stream_tasks/smoke_runs/demo \
+  --run-state data/05.stream_tasks/thought2_stream_screen_2026-04-23/thought2_stream_screen_2026-04-23/run_state.json \
+  --ordinary-library data/05.stream_tasks/thought2_stream_screen_2026-04-23/thought2_stream_screen_2026-04-23/validation_output/thought2_enumeration/input_libraries/shared_ordinary_library.csv \
+  --pos13-library data/05.stream_tasks/thought2_stream_screen_2026-04-23/thought2_stream_screen_2026-04-23/validation_output/thought2_enumeration/input_libraries/pos13_sugar_library.csv \
+  --chunk-manifest data/05.stream_tasks/thought2_stream_screen_2026-04-23/thought2_stream_screen_2026-04-23/validation_output/thought2_enumeration/chunk_manifest.csv \
+  --stop-index 100000 \
+  --shard-size 20000 \
+  --prediction-batch-size 512 \
+  --classifier-backend pickle \
+  --num-graph-workers 0
 ```
 
 ## `mole score`

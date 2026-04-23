@@ -41,6 +41,8 @@ The shortest path for common tasks is:
   - `pixi run mole predict --smiles CCO`
 - Batch screening from CSV/TSV/archive inputs:
   - `pixi run mole screen --input-path data/04.new_predictions/2026-04-21_screening/macro_split_ring16_scheme_b_fix_pos13_per_scaffold_2026-04-21.tar.gz --output-dir data/04.new_predictions/2026-04-21_screening/runs/demo`
+- Streaming hit-only screening from scaffold/fragment libraries:
+  - `pixi run mole stream-enumeration-screen --output-dir data/05.stream_tasks/smoke_runs/demo --ordinary-library <shared_library.csv> --pos13-library <pos13_library.csv> --stop-index 100000 --classifier-backend pickle`
 - Preferred high-throughput preprocessing:
   - `pixi run mole preprocess-screening-input --input-path <raw_csv> --output-dir <prepared_dir> --smiles-colname <smiles_col> --chem-id-colname <chem_id_col> --source-group <group_name>`
 - REINVENT4 reward computation:
@@ -60,9 +62,12 @@ For batch-screening input preparation guidance, read:
 
 - [docs/cli_reference.md](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/cli_reference.md)
 - [docs/batch_screening_input_format.md](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/batch_screening_input_format.md)
+- [docs/stream_enumeration_screen_runbook.md](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/stream_enumeration_screen_runbook.md)
 
-That document is the canonical explanation of why raw `tar.gz` bundles and one
-huge CSV are transport/storage formats, not preferred screening formats.
+The batch input guide explains why raw `tar.gz` bundles and one huge CSV are
+transport/storage formats, not preferred screening formats. The stream
+enumeration runbook covers hit-only combinatorial screening without materializing
+full molecule tables.
 
 ## Root Directory Policy
 
@@ -116,14 +121,16 @@ index first.
 - [`mole_cli.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/mole_cli.py)
   - owns the public `mole` CLI surface
   - defines `mole predict`, `mole screen`, `mole preprocess-screening-input`,
-    `mole benchmark-screening-inputs`, `mole doctor`, `mole score`,
-    `mole optimize`
+    `mole benchmark-screening-inputs`, `mole stream-enumeration-screen`,
+    `mole doctor`, `mole score`, `mole optimize`
   - important parameter families:
     `--classifier-backend`, `--num-graph-workers`, `--graph-batch-size`,
     `--prefetch-batches`, `--profiling`,
     `--deterministic-representation`, `--grouping-mode`, `--cpu-workers`,
     `--input-chunk-size`, `--max-batch-size`,
-    `--target-gpu-memory-fraction`, `--prediction-row-budget`
+    `--target-gpu-memory-fraction`, `--prediction-row-budget`,
+    `--start-index`, `--stop-index`, `--shard-size`,
+    `--prediction-batch-size`
 - [`src/prediction_scheduler.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/prediction_scheduler.py)
   - owns adaptive GPU micro-batching and runtime snapshots
   - consumes GPU-facing knobs such as `--max-batch-size`,
@@ -156,6 +163,10 @@ index first.
   - consumes `--no-dedupe-smiles`, `--aggregate-scores` / `--per-strain`,
     `--prefetch-queue-size`, `--prediction-row-budget`, output writing, and
     manifest runtime fields
+- [`src/stream_enumeration_screen.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/stream_enumeration_screen.py)
+  - owns deterministic index mapping, scaffold/fragment loading, shard
+    checkpointing, hit-only parquet writes, and resume/idempotency behavior for
+    `mole stream-enumeration-screen`
 - [`src/preprocess_screening_input.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/preprocess_screening_input.py)
   - owns `mole preprocess-screening-input`
   - consumes `--input-path`, `--output-dir`, `--smiles-colname`,
@@ -205,6 +216,8 @@ Import these from other code instead of duplicating behavior:
   - Planners that dynamically split large sources into parallel manageable work-units
 - [`src/batch_screening.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/batch_screening.py)
   - Batch screening loop managing ThreadPoolExecutor and Single GPU producer/consumer stream
+- [`src/stream_enumeration_screen.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/stream_enumeration_screen.py)
+  - Streaming scaffold/fragment enumeration with shard manifests and hit-only parquet output
 - [`src/classifier_backend.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/classifier_backend.py)
   - Pickle/XGBoost and Timber backend selection; `auto` prefers pickle when available
 - [`src/models.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/models.py)

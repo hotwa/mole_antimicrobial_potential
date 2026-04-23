@@ -119,6 +119,15 @@ Commonly used command families and their tuning surface:
     `--prediction-row-budget`, `--num-graph-workers`,
     `--graph-batch-size`, `--prefetch-batches`, `--profiling`,
     `--deterministic-representation`
+- `mole stream-enumeration-screen`
+  - scaffold/content: `--scaffold-file`, `--scaffold-dir`,
+    `--scaffold-catalog`, `--ordinary-library`, `--pos13-library`,
+    `--start-index`, `--stop-index`, `--app-threshold`, `--min-nkill`
+  - resume/output: `--output-dir`, `--run-state`, `--chunk-manifest`
+  - throughput/scheduling: `--shard-size`, `--prediction-batch-size`,
+    `--classifier-backend`, `--num-graph-workers`, `--graph-batch-size`,
+    `--prefetch-batches`, `--profiling`,
+    `--deterministic-representation`
 - `mole preprocess-screening-input`
   - `--input-path`, `--output-dir`, `--smiles-colname`,
     `--chem-id-colname`, `--source-group`, `--rows-per-shard`,
@@ -128,6 +137,7 @@ Detailed parameter semantics live in:
 
 - [docs/cli_reference.md](docs/cli_reference.md)
 - [docs/batch_screening_input_format.md](docs/batch_screening_input_format.md)
+- [docs/stream_enumeration_screen_runbook.md](docs/stream_enumeration_screen_runbook.md)
 - [docs/repo_layout.md](docs/repo_layout.md)
 - [data/04.new_predictions/README.md](data/04.new_predictions/README.md)
 
@@ -246,6 +256,19 @@ pixi run mole screen \
   --graph-batch-size 1024 \
   --prediction-row-budget 8192 \
   --profiling
+
+# Stream scaffold/fragment combinations directly and persist only broad-spectrum hits
+pixi run mole stream-enumeration-screen \
+  --output-dir data/05.stream_tasks/smoke_runs/demo \
+  --run-state data/05.stream_tasks/thought2_stream_screen_2026-04-23/thought2_stream_screen_2026-04-23/run_state.json \
+  --ordinary-library data/05.stream_tasks/thought2_stream_screen_2026-04-23/thought2_stream_screen_2026-04-23/validation_output/thought2_enumeration/input_libraries/shared_ordinary_library.csv \
+  --pos13-library data/05.stream_tasks/thought2_stream_screen_2026-04-23/thought2_stream_screen_2026-04-23/validation_output/thought2_enumeration/input_libraries/pos13_sugar_library.csv \
+  --chunk-manifest data/05.stream_tasks/thought2_stream_screen_2026-04-23/thought2_stream_screen_2026-04-23/validation_output/thought2_enumeration/chunk_manifest.csv \
+  --stop-index 100000 \
+  --shard-size 20000 \
+  --prediction-batch-size 512 \
+  --classifier-backend pickle \
+  --num-graph-workers 0
 
 # Compute REINVENT4 rewards
 pixi run mole score \
