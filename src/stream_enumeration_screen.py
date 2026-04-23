@@ -251,6 +251,55 @@ def _attach_fragment(scaffold: Chem.Mol, attachment_label: int, fragment_smiles:
     return result
 
 
+def _attach_fragment_cached(
+    scaffold: Chem.Mol,
+    attachment_label: int,
+    fragment_mol: Chem.Mol,
+    fragment_attachment_info: tuple[int, int, Chem.BondType],
+) -> Chem.Mol:
+    """Attach fragment with pre-computed fragment attachment info."""
+    scaffold_idx = _find_scaffold_attachment_index(scaffold, attachment_label)
+    fragment_idx, fragment_neighbor, fragment_bond_type = fragment_attachment_info
+
+    scaffold_atom = scaffold.GetAtomWithIdx(scaffold_idx)
+    if len(scaffold_atom.GetNeighbors()) != 1:
+        raise ValueError("Scaffold dummy atom must be terminal")
+
+    scaffold_neighbor = scaffold_atom.GetNeighbors()[0].GetIdx()
+    scaffold_bond = scaffold.GetBondBetweenAtoms(scaffold_idx, scaffold_neighbor)
+    bond_type = Chem.BondType.SINGLE
+    if scaffold_bond is not None and scaffold_bond.GetBondType() != Chem.BondType.UNSPECIFIED:
+        bond_type = scaffold_bond.GetBondType()
+    elif fragment_bond_type != Chem.BondType.UNSPECIFIED:
+        bond_type = fragment_bond_type
+
+    combined = Chem.RWMol(Chem.CombineMols(scaffold, fragment_mol))
+    fragment_offset = scaffold.GetNumAtoms()
+    combined.AddBond(scaffold_neighbor, fragment_neighbor + fragment_offset, bond_type)
+    for atom_index in sorted([scaffold_idx, fragment_idx + fragment_offset], reverse=True):
+        combined.RemoveAtom(atom_index)
+
+    result = combined.GetMol()
+    Chem.SanitizeMol(result)
+    return result
+
+
+def _compute_fragment_attachment_info(fragment: Chem.Mol) -> tuple[int, int, Chem.BondType]:
+    """Pre-compute fragment attachment info."""
+    matches = [atom for atom in fragment.GetAtoms() if atom.GetAtomicNum() == 0]
+    if len(matches) != 1:
+        raise ValueError("Fragments must contain exactly one dummy atom")
+    dummy_atom = matches[0]
+    idx = dummy_atom.GetIdx()
+    neighbors = dummy_atom.GetNeighbors()
+    if len(neighbors) != 1:
+        raise ValueError("Fragment dummy atom must be terminal")
+    neighbor_idx = neighbors[0].GetIdx()
+    bond = fragment.GetBondBetweenAtoms(idx, neighbor_idx)
+    bond_type = bond.GetBondType() if bond is not None else Chem.BondType.UNSPECIFIED
+    return (idx, neighbor_idx, bond_type)
+
+
 def _assemble_molecule(scaffold_smiles: str, fragments: Mapping[str, str]) -> str:
     scaffold = Chem.MolFromSmiles(scaffold_smiles)
     if scaffold is None:
@@ -416,27 +465,68 @@ def _materialize_batch(
     pos13_fragments: Sequence[str],
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for global_index in range(start_idx, end_idx):
-        scaffold_idx, pos3_idx, pos4_idx, pos12_idx, pos13_idx = decode_global_index(global_index, space)
-        scaffold = scaffolds[scaffold_idx]
-        smiles = _assemble_molecule(
-            scaffold.scaffold_smiles,
-            {
-                "pos3": ordinary_fragments[pos3_idx],
-                "pos4": ordinary_fragments[pos4_idx],
-                "pos12": ordinary_fragments[pos12_idx],
-                "pos13": pos13_fragments[pos13_idx],
-            },
-        )
-        rows.append(
-            {
-                "chem_id": f"{scaffold.scaffold_slug}__g{global_index}",
-                "smiles": smiles,
-                "global_combination_index": global_index,
-                "scaffold_idx": scaffold_idx,
-                "scaffold_slug": scaffold.scaffold_slug,
-            }
-        )
+
+    if _MATERIALIZATION_CONTEXT is not None:
+        # Use pre-computed mol objects for faster assembly
+        scaffold_mols = _MATERIALIZATION_CONTEXT["scaffold_mols"]
+        ordinary_fragment_mols = _MATERIALIZATION_CONTEXT["ordinary_fragment_mols"]
+        ordinary_fragment_attachment_infos = _MATERIALIZATION_CONTEXT["ordinary_fragment_attachment_infos"]
+        pos13_fragment_mols = _MATERIALIZATION_CONTEXT["pos13_fragment_mols"]
+        pos13_fragment_attachment_infos = _MATERIALIZATION_CONTEXT["pos13_fragment_attachment_infos"]
+
+        for global_index in range(start_idx, end_idx):
+            scaffold_idx, pos3_idx, pos4_idx, pos12_idx, pos13_idx = decode_global_index(global_index, space)
+            scaffold = scaffolds[scaffold_idx]
+
+            # Get pre-computed objects
+            scaffold_mol = scaffold_mols[scaffold_idx]
+
+            # Assemble molecule using cached data
+            current = scaffold_mol
+            for position_name, frag_idx, frag_mol, frag_info in [
+                ("pos4", pos4_idx, ordinary_fragment_mols[pos4_idx], ordinary_fragment_attachment_infos[pos4_idx]),
+                ("pos3", pos3_idx, ordinary_fragment_mols[pos3_idx], ordinary_fragment_attachment_infos[pos3_idx]),
+                ("pos13", pos13_idx, pos13_fragment_mols[pos13_idx], pos13_fragment_attachment_infos[pos13_idx]),
+                ("pos12", pos12_idx, ordinary_fragment_mols[pos12_idx], ordinary_fragment_attachment_infos[pos12_idx]),
+            ]:
+                attachment_label = DEFAULT_POSITION_TO_ATTACHMENT[position_name]
+                current = _attach_fragment_cached(
+                    current, attachment_label, frag_mol, frag_info
+                )
+
+            smiles = Chem.MolToSmiles(current, canonical=True, isomericSmiles=True)
+            rows.append(
+                {
+                    "chem_id": f"{scaffold.scaffold_slug}__g{global_index}",
+                    "smiles": smiles,
+                    "global_combination_index": global_index,
+                    "scaffold_idx": scaffold_idx,
+                    "scaffold_slug": scaffold.scaffold_slug,
+                }
+            )
+    else:
+        # Fallback to original implementation
+        for global_index in range(start_idx, end_idx):
+            scaffold_idx, pos3_idx, pos4_idx, pos12_idx, pos13_idx = decode_global_index(global_index, space)
+            scaffold = scaffolds[scaffold_idx]
+            smiles = _assemble_molecule(
+                scaffold.scaffold_smiles,
+                {
+                    "pos3": ordinary_fragments[pos3_idx],
+                    "pos4": ordinary_fragments[pos4_idx],
+                    "pos12": ordinary_fragments[pos12_idx],
+                    "pos13": pos13_fragments[pos13_idx],
+                },
+            )
+            rows.append(
+                {
+                    "chem_id": f"{scaffold.scaffold_slug}__g{global_index}",
+                    "smiles": smiles,
+                    "global_combination_index": global_index,
+                    "scaffold_idx": scaffold_idx,
+                    "scaffold_slug": scaffold.scaffold_slug,
+                }
+            )
     return rows
 
 
@@ -447,11 +537,45 @@ def _init_materialization_worker(
     pos13_fragments: Sequence[str],
 ) -> None:
     global _MATERIALIZATION_CONTEXT
+
+    # Pre-compute scaffold mols
+    scaffold_mols = []
+    for scaffold in scaffolds:
+        mol = Chem.MolFromSmiles(scaffold.scaffold_smiles)
+        if mol is None:
+            raise ValueError(f"Bad scaffold SMILES: {scaffold.scaffold_smiles}")
+        scaffold_mols.append(mol)
+
+    # Pre-compute ordinary fragment mols and attachment info
+    ordinary_fragment_mols = []
+    ordinary_fragment_attachment_infos = []
+    for smiles in ordinary_fragments:
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            raise ValueError(f"Bad fragment SMILES: {smiles}")
+        ordinary_fragment_mols.append(mol)
+        ordinary_fragment_attachment_infos.append(_compute_fragment_attachment_info(mol))
+
+    # Pre-compute pos13 fragment mols and attachment info
+    pos13_fragment_mols = []
+    pos13_fragment_attachment_infos = []
+    for smiles in pos13_fragments:
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            raise ValueError(f"Bad pos13 fragment SMILES: {smiles}")
+        pos13_fragment_mols.append(mol)
+        pos13_fragment_attachment_infos.append(_compute_fragment_attachment_info(mol))
+
     _MATERIALIZATION_CONTEXT = {
         "space": space,
         "scaffolds": tuple(scaffolds),
+        "scaffold_mols": tuple(scaffold_mols),
         "ordinary_fragments": tuple(ordinary_fragments),
+        "ordinary_fragment_mols": tuple(ordinary_fragment_mols),
+        "ordinary_fragment_attachment_infos": tuple(ordinary_fragment_attachment_infos),
         "pos13_fragments": tuple(pos13_fragments),
+        "pos13_fragment_mols": tuple(pos13_fragment_mols),
+        "pos13_fragment_attachment_infos": tuple(pos13_fragment_attachment_infos),
     }
 
 
@@ -471,7 +595,7 @@ def _materialize_batch_in_worker(start_idx: int, end_idx: int) -> list[dict[str,
 def _resolve_enumeration_workers(value: int | str | None) -> int:
     if value in (None, "auto"):
         cpu_count = os.cpu_count() or 1
-        return max(1, min(4, cpu_count // 2 or 1))
+        return max(1, min(6, cpu_count // 2 or 1))
     workers = int(value)
     if workers <= 0:
         raise ValueError("enumeration_workers must be positive")
