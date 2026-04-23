@@ -20,22 +20,45 @@
 
 ### 1. XGBoost 预测优化 (优先级最高)
 
-**当前状态**: 使用 `ThreadPoolExecutor` with `classifier_workers=1` (auto 模式)
+**当前状态**:
+
+- 预测路径已经使用 `ThreadPoolExecutor` 做 MolE 后的 classifier/aggregation overlap
+- `classifier_workers=auto` 已实现为 backend-aware + quota-aware：
+  - `pickle`: `max(1, min(8, available_cpu_count // 4))`
+  - `timber`: `1`
+- 当前 24 核机器上，`pickle + auto` 会解析到 `6`
+- 真实 worker sweep 已由 `scripts/benchmark_classifier_workers.py` 承担，不再依赖手工命令拼装
 
 **优化方案**:
 
-#### 方案 A: 增加 classifier_workers
+#### 已落地方案: classifier_workers auto + benchmark sweep
 ```python
-# 当前配置
-classifier_workers = "auto"  # 默认为 1
+# 当前实现
+classifier_workers = "auto"
 
-# 优化配置
-classifier_workers = 8  # 或更多，取决于 CPU 核心数
+# pickle
+resolved = max(1, min(8, available_cpu_count // 4))
+
+# timber
+resolved = 1
 ```
 
-**预期效果**:
-- 8 workers: ~8x 加速 (理论值)
-- 实际效果: 由于 XGBoost 内部已使用多线程，可能只有 2-4x 加速
+**执行方式**:
+
+```bash
+pixi run python scripts/benchmark_classifier_workers.py \
+  --mode predictor \
+  --ordinary-library data/05.stream_tasks/thought2_stream_screen_2026-04-23/thought2_stream_screen_2026-04-23/validation_output/thought2_enumeration/input_libraries/shared_ordinary_library.csv \
+  --pos13-library data/05.stream_tasks/thought2_stream_screen_2026-04-23/thought2_stream_screen_2026-04-23/validation_output/thought2_enumeration/input_libraries/pos13_sugar_library.csv \
+  --workers 1 2 4 6 8 12 \
+  --sample-size 8192 \
+  --repeats 3 \
+  --classifier-backend pickle \
+  --num-graph-workers 0 \
+  --output data/05.stream_tasks/benchmarks/classifier_workers/predictor_sample8192.json
+```
+
+这个 benchmark 会输出每个 worker 候选值的中位吞吐和自动选择的最佳值。
 
 #### 方案 B: 使用 XGBoost GPU 预测
 ```python

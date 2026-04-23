@@ -111,6 +111,9 @@ Commonly used command families and their tuning surface:
 - `mole benchmark-screening-inputs`
   - `--input-path`, `--output`
   - lightweight input-path inspection for comparing candidate screening sources
+- `scripts/benchmark_classifier_workers.py`
+  - non-CLI benchmark helper for sweeping `classifier_workers` in `predictor`
+    or `stream` mode on the current machine
 - `mole screen`
   - mode/content: `--execution-mode`, `--archive-pattern`,
     `--archive-smiles-colname`, `--archive-chem-id-colname`,
@@ -134,7 +137,8 @@ Commonly used command families and their tuning surface:
   - resume/output: `--output-dir`, `--run-state`, `--chunk-manifest`
   - throughput/scheduling: `--shard-size`, `--prediction-batch-size`,
     `--classifier-backend`, `--num-graph-workers`, `--graph-batch-size`,
-    `--prefetch-batches`, `--profiling`,
+    `--prefetch-batches`, `--classifier-workers`,
+    `--classifier-inflight-batches`, `--profiling`,
     `--deterministic-representation`
 - `mole preprocess-screening-input`
   - `--input-path`, `--output-dir`, `--smiles-colname`,
@@ -147,6 +151,7 @@ Detailed parameter semantics live in:
 - [docs/batch_screening_input_format.md](docs/batch_screening_input_format.md)
 - [docs/process_screening.md](docs/process_screening.md)
 - [docs/stream_enumeration_screen_runbook.md](docs/stream_enumeration_screen_runbook.md)
+- [docs/prediction_optimization_plan.md](docs/prediction_optimization_plan.md)
 - [docs/repo_layout.md](docs/repo_layout.md)
 - [data/04.new_predictions/README.md](data/04.new_predictions/README.md)
 
@@ -299,6 +304,18 @@ pixi run mole stream-enumeration-screen \
   --classifier-backend pickle \
   --num-graph-workers 0
 
+# Sweep classifier_workers before overriding auto on a new machine
+pixi run python scripts/benchmark_classifier_workers.py \
+  --mode predictor \
+  --ordinary-library data/05.stream_tasks/thought2_stream_screen_2026-04-23/thought2_stream_screen_2026-04-23/validation_output/thought2_enumeration/input_libraries/shared_ordinary_library.csv \
+  --pos13-library data/05.stream_tasks/thought2_stream_screen_2026-04-23/thought2_stream_screen_2026-04-23/validation_output/thought2_enumeration/input_libraries/pos13_sugar_library.csv \
+  --workers 1 2 4 6 8 12 \
+  --sample-size 8192 \
+  --repeats 3 \
+  --classifier-backend pickle \
+  --num-graph-workers 0 \
+  --output data/05.stream_tasks/benchmarks/classifier_workers/predictor_sample8192.json
+
 # Compute REINVENT4 rewards
 pixi run mole score \
   --objective-file workflows/reinvent4/inputs/objectives/pathogen_group_a.site_reward.prototype.json \
@@ -327,6 +344,9 @@ Notes:
   items dynamically without relying on fixed scaffold sizes or arbitrary constants.
   It auto-fills missing `chem_id` values, evaluates chunks efficiently, writes a
   total summary table first, and also writes per-source grouped results under `by_source/`.
+- `classifier_workers=auto` is backend-aware. For `pickle`, it resolves from
+  the effective CPU quota with a conservative cap. For `timber`, it stays at
+  `1` until concurrent native safety is explicitly validated.
 - The default classifier backend is `auto`; it prefers the original
   pickle/XGBoost model when available and falls back to Timber only when the
   pickle model is missing. This keeps results aligned with the original MolE
