@@ -425,10 +425,12 @@ class TestModelReuse(unittest.TestCase):
 
         self.assertEqual(normalize_mock.call_count, 1)
 
-    def test_predict_molecules_records_last_profile_when_profiling_enabled(self) -> None:
+    def test_predict_molecules_records_resolved_auto_classifier_profile_when_profiling_enabled(self) -> None:
         from src.prediction_scheduler import PredictionScheduler
         from src.models import MoleculeInfo
 
+        resolved_classifier_workers = 6
+        resolved_classifier_inflight_batches = 7
         mock_predictor = mock.AsyncMock()
         mock_predictor.ensure_loaded = mock.AsyncMock()
         mock_predictor.predict = mock.AsyncMock(return_value=[{"chem_id": "mol1", "apscore_total": -1.0}])
@@ -439,8 +441,8 @@ class TestModelReuse(unittest.TestCase):
                 "growth_inhibition_seconds": 0.1,
                 "aggregate_scores_seconds": 0.3,
                 "classifier_stage_seconds": 0.9,
-                "classifier_workers": 3,
-                "classifier_inflight_batches": 5,
+                "classifier_workers": resolved_classifier_workers,
+                "classifier_inflight_batches": resolved_classifier_inflight_batches,
                 "xgboost_seconds": 0.5,
                 "graph_build": {"graph_total_seconds": 0.25, "graph_items": 1},
             }
@@ -452,6 +454,8 @@ class TestModelReuse(unittest.TestCase):
             max_batch_size=4,
             min_batch_size=1,
             target_memory_fraction=0.80,
+            classifier_workers="auto",
+            classifier_inflight_batches="auto",
         )
 
         _run(
@@ -461,15 +465,13 @@ class TestModelReuse(unittest.TestCase):
                 app_threshold=0.04374,
                 min_nkill=10,
                 enable_profiling=True,
-                classifier_workers=3,
-                classifier_inflight_batches=5,
             )
         )
 
         _, kwargs = mock_predictor.predict.call_args
         self.assertTrue(kwargs["enable_profiling"])
-        self.assertEqual(kwargs["classifier_workers"], 3)
-        self.assertEqual(kwargs["classifier_inflight_batches"], 5)
+        self.assertEqual(kwargs["classifier_workers"], "auto")
+        self.assertEqual(kwargs["classifier_inflight_batches"], "auto")
         self.assertEqual(
             sched.runtime_snapshot()["last_profile"]["graph_build"]["graph_items"],
             1,
@@ -484,11 +486,19 @@ class TestModelReuse(unittest.TestCase):
         )
         self.assertEqual(
             sched.runtime_snapshot()["last_profile"]["classifier_workers"],
-            3,
+            resolved_classifier_workers,
         )
         self.assertEqual(
             sched.runtime_snapshot()["last_profile"]["classifier_inflight_batches"],
-            5,
+            resolved_classifier_inflight_batches,
+        )
+        self.assertEqual(
+            sched.runtime_snapshot()["classifier_workers"],
+            resolved_classifier_workers,
+        )
+        self.assertEqual(
+            sched.runtime_snapshot()["classifier_inflight_batches"],
+            resolved_classifier_inflight_batches,
         )
 
     def test_predict_molecules_aggregates_profiles_across_internal_chunks(self) -> None:

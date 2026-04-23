@@ -55,6 +55,7 @@ For the current RTX 2080 Ti 22GB machine:
 | --- | --- | --- |
 | `--classifier-backend` | `pickle` | Closest to original MolE/XGBoost path and faster than Timber in local benchmarks |
 | `--num-graph-workers` | `0` | Best local steady-state benchmark on this machine; avoids worker overhead |
+| `--classifier-workers` | `auto` | For `pickle`, currently resolves to `6` on this 24-core host; for `timber`, resolves to `1` |
 | `--graph-batch-size` | `1024` | Stable default for MolE graph/forward batching |
 | `--prediction-batch-size` | `512` | Keeps stream enumeration memory bounded while giving the scheduler enough rows |
 | `--shard-size` | `1000000` | Recovery granularity of roughly one million combinations per shard |
@@ -73,6 +74,45 @@ For RTX 5090 32GB, start with:
 Re-benchmark `--num-graph-workers 0/2/4/8` on the new machine before production.
 This parameter changes throughput and CPU contention, not prediction semantics
 for a fixed model/backend.
+
+Re-benchmark `classifier_workers` on any new machine before production. The
+recommended sweep is `1 2 4 6 8 12` for `pickle`, using the helper script
+below.
+
+## Classifier Worker Benchmark
+
+Run this before overriding `--classifier-workers`:
+
+```bash
+pixi run python scripts/benchmark_classifier_workers.py \
+  --mode predictor \
+  --ordinary-library "$ORDINARY_LIBRARY" \
+  --pos13-library "$POS13_LIBRARY" \
+  --workers 1 2 4 6 8 12 \
+  --sample-size 8192 \
+  --repeats 3 \
+  --classifier-backend pickle \
+  --num-graph-workers 0 \
+  --output data/05.stream_tasks/benchmarks/classifier_workers/predictor_sample8192.json
+```
+
+If you want the full stream path instead of the predictor micro-benchmark:
+
+```bash
+pixi run python scripts/benchmark_classifier_workers.py \
+  --mode stream \
+  --ordinary-library "$ORDINARY_LIBRARY" \
+  --pos13-library "$POS13_LIBRARY" \
+  --run-state "$RUN_STATE" \
+  --chunk-manifest "$CHUNK_MANIFEST" \
+  --workers 1 2 4 6 8 12 \
+  --sample-size 8192 \
+  --repeats 3 \
+  --classifier-backend pickle \
+  --num-graph-workers 0 \
+  --prediction-batch-size 512 \
+  --output data/05.stream_tasks/benchmarks/classifier_workers/stream_sample8192.json
+```
 
 ## Dry-Run With Manual Interrupt And Resume
 
@@ -367,4 +407,3 @@ else:
     print({"hit_rows": 0, "output": str(out), "note": "no hit shards found"})
 PY
 ```
-

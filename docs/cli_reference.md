@@ -150,6 +150,8 @@ Predict antimicrobial activity for one or more molecules.
 | `--num-graph-workers` | `auto` | CPU workers used for `SMILES -> RDKit -> graph -> PyG DataLoader batch` | performance |
 | `--graph-batch-size` | `1024` | MolE graph construction and forward mini-batch size | performance |
 | `--prefetch-batches` | `2` | Prefetched graph mini-batches per graph worker | performance |
+| `--classifier-workers` | `auto` | CPU classifier workers used after MolE embedding generation | performance |
+| `--classifier-inflight-batches` | `auto` | Max aggregate-classifier batches kept in flight before ordered merge | performance |
 | `--profiling` | disabled | Emit MolE graph-build and prediction runtime profiling | performance |
 | `--deterministic-representation` | disabled | Force deterministic CUDA MolE forward passes | reproducibility |
 | `--output` | stdout | Optional output file path | output |
@@ -168,6 +170,24 @@ This does not disable graph construction. It only disables extra graph worker
 processes/threads so graph construction stays in the main process. For a fixed
 model and backend, it should not change prediction semantics. It only changes
 throughput and CPU resource contention.
+
+### `classifier_workers=auto`
+
+`classifier_workers` controls the CPU classifier/aggregation overlap that runs
+after MolE embeddings are produced.
+
+- `auto` is backend-aware
+- for `pickle`, it resolves from the effective CPU quota / affinity using a
+  conservative heuristic:
+  `max(1, min(8, available_cpu_count // 4))`
+- for `timber`, it resolves to `1` by default because the compiled backend uses
+  shared native state and is treated conservatively until explicit concurrent
+  safety is proven
+- `classifier_inflight_batches=auto` stays coupled to the resolved worker count
+  as `max(2, classifier_workers + 1)`
+
+Use `pixi run python scripts/benchmark_classifier_workers.py ...` to sweep
+candidate worker counts on a specific machine before overriding `auto`.
 
 ### Minimal example
 
@@ -318,6 +338,8 @@ Batch-screen large molecule sets for antimicrobial activity.
 | `--prefetch-batches` | `2` | Prefetched graph mini-batches per graph worker | performance |
 | `--prediction-row-budget` | `8192` | Consecutive ready rows merged into a single prediction call up to this row budget | performance |
 | `--profiling` | disabled | Write stage timing into `manifest.json` | performance |
+| `--classifier-workers` | `auto` | CPU classifier workers used after MolE embedding generation | performance |
+| `--classifier-inflight-batches` | `auto` | Max aggregate-classifier batches kept in flight before ordered merge | performance |
 
 ### Reproducibility Parameter
 
@@ -346,6 +368,19 @@ forward:
 - graph construction stays in the main process
 - prediction semantics should stay the same for a fixed model/backend
 - only throughput and CPU contention change
+
+### `classifier_workers=auto`
+
+For `mole screen`, `classifier_workers=auto` uses the same backend-aware rule
+as `mole predict`:
+
+- `pickle`: quota-aware `max(1, min(8, available_cpu_count // 4))`
+- `timber`: `1`
+
+This setting only changes throughput. It should not change prediction content
+for a fixed model/backend. If you want to tune it explicitly, benchmark a
+representative shard first with
+`scripts/benchmark_classifier_workers.py --mode predictor` or `--mode stream`.
 
 ### Minimal example
 
@@ -428,6 +463,8 @@ persist only broad-spectrum hit shards plus resumable run state.
 | `--num-graph-workers` | `auto` | CPU graph workers for the MolE pre-forward graph path | performance |
 | `--graph-batch-size` | `1024` | MolE graph / forward mini-batch size | performance |
 | `--prefetch-batches` | `2` | Prefetched graph mini-batches per graph worker | performance |
+| `--classifier-workers` | `auto` | CPU classifier workers used after MolE embedding generation | performance |
+| `--classifier-inflight-batches` | `auto` | Max aggregate-classifier batches kept in flight before ordered merge | performance |
 | `--profiling` | disabled | Enable prediction profiling during streaming enumeration | performance |
 
 ### Reproducibility Parameter
@@ -459,6 +496,24 @@ pixi run mole stream-enumeration-screen \
   --prediction-batch-size 512 \
   --classifier-backend pickle \
   --num-graph-workers 0
+```
+
+### Auxiliary benchmark script
+
+Use the non-CLI benchmark helper when you need to compare candidate
+`classifier_workers` values on a specific machine:
+
+```bash
+pixi run python scripts/benchmark_classifier_workers.py \
+  --mode predictor \
+  --ordinary-library data/05.stream_tasks/thought2_stream_screen_2026-04-23/thought2_stream_screen_2026-04-23/validation_output/thought2_enumeration/input_libraries/shared_ordinary_library.csv \
+  --pos13-library data/05.stream_tasks/thought2_stream_screen_2026-04-23/thought2_stream_screen_2026-04-23/validation_output/thought2_enumeration/input_libraries/pos13_sugar_library.csv \
+  --workers 1 2 4 6 8 12 \
+  --sample-size 8192 \
+  --repeats 3 \
+  --classifier-backend pickle \
+  --num-graph-workers 0 \
+  --output data/05.stream_tasks/benchmarks/classifier_workers/predictor_sample8192.json
 ```
 
 ## `mole score`
