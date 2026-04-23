@@ -595,7 +595,7 @@ def _materialize_batch_in_worker(start_idx: int, end_idx: int) -> list[dict[str,
 def _resolve_enumeration_workers(value: int | str | None) -> int:
     if value in (None, "auto"):
         cpu_count = os.cpu_count() or 1
-        return max(1, min(4, cpu_count // 2 or 1))
+        return max(1, min(6, cpu_count // 2 or 1))
     workers = int(value)
     if workers <= 0:
         raise ValueError("enumeration_workers must be positive")
