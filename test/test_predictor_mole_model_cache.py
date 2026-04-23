@@ -238,6 +238,46 @@ class PredictorMolEModelCacheTestCase(TestCase):
         self.assertIsInstance(predictor.model.inputs[0], np.ndarray)
         self.assertEqual(len(result), 4)
 
+    def test_resolve_classifier_workers_auto_scales_for_non_timber_backend(self) -> None:
+        predictor = self._build_predictor()
+
+        with patch.object(predictor, "_classifier_backend_name", return_value="pickle"), patch.object(
+            predictor,
+            "_available_cpu_count",
+            return_value=24,
+        ):
+            self.assertEqual(predictor._resolve_classifier_workers("auto"), 6)
+
+    def test_resolve_classifier_workers_auto_stays_one_for_low_core_non_timber_backend(self) -> None:
+        predictor = self._build_predictor()
+
+        with patch.object(predictor, "_classifier_backend_name", return_value="pickle"), patch.object(
+            predictor,
+            "_available_cpu_count",
+            return_value=3,
+        ):
+            self.assertEqual(predictor._resolve_classifier_workers("auto"), 1)
+
+    def test_resolve_classifier_workers_auto_clamps_at_eight_for_high_core_non_timber_backend(self) -> None:
+        predictor = self._build_predictor()
+
+        with patch.object(predictor, "_classifier_backend_name", return_value="pickle"), patch.object(
+            predictor,
+            "_available_cpu_count",
+            return_value=64,
+        ):
+            self.assertEqual(predictor._resolve_classifier_workers("auto"), 8)
+
+    def test_resolve_classifier_workers_auto_returns_one_for_timber_backend(self) -> None:
+        predictor = self._build_predictor()
+
+        with patch.object(predictor, "_classifier_backend_name", return_value="timber"), patch.object(
+            predictor,
+            "_available_cpu_count",
+            side_effect=AssertionError("timber auto should not consult CPU quota"),
+        ):
+            self.assertEqual(predictor._resolve_classifier_workers("auto"), 1)
+
     def test_predict_records_aggregate_profiling_fields(self) -> None:
         predictor = self._build_predictor()
         predictor._model_loaded = True
@@ -261,6 +301,8 @@ class PredictorMolEModelCacheTestCase(TestCase):
                 return np.tile(np.array([[0.25, 0.75]], dtype=np.float32), (rows, 1))
 
         predictor.model = _RecordingClassifier()
+        expected_classifier_workers = 6
+        expected_classifier_inflight_batches = 7
 
         batches = [
             {
@@ -295,7 +337,11 @@ class PredictorMolEModelCacheTestCase(TestCase):
             },
         ]
 
-        with patch.object(predictor, "_iter_mole_representation_batches", return_value=iter(batches)):
+        with patch.object(predictor, "_classifier_backend_name", return_value="pickle"), patch.object(
+            predictor,
+            "_available_cpu_count",
+            return_value=24,
+        ), patch.object(predictor, "_iter_mole_representation_batches", return_value=iter(batches)):
             import asyncio
             from src.models import MoleculeInput
 
@@ -328,8 +374,8 @@ class PredictorMolEModelCacheTestCase(TestCase):
         self.assertGreaterEqual(profile["growth_inhibition_seconds"], 0.0)
         self.assertGreaterEqual(profile["aggregate_scores_seconds"], 0.0)
         self.assertGreaterEqual(profile["classifier_stage_seconds"], 0.0)
-        self.assertEqual(profile["classifier_workers"], 1)
-        self.assertEqual(profile["classifier_inflight_batches"], 2)
+        self.assertEqual(profile["classifier_workers"], expected_classifier_workers)
+        self.assertEqual(profile["classifier_inflight_batches"], expected_classifier_inflight_batches)
 
     def test_aggregate_scores_from_matrix_matches_legacy_groupby_result(self) -> None:
         predictor = self._build_predictor()
