@@ -102,6 +102,8 @@ Additional layout notes:
   - Local reference PDFs and related literature assets
 - [`.trash/`](/home/lingyuzeng/project/mole_antimicrobial_potential/.trash)
   - Quarantine area for ad hoc scripts, scratch inputs, and runtime leftovers
+  - `.trash/test_ad_hoc/` is the preferred holding area for one-off test probes
+    that are not part of the maintained `test/` suite
 
 ## Parameter Ownership Index
 
@@ -212,6 +214,32 @@ Import these from other code instead of duplicating behavior:
   - REINVENT4 config rendering, chunk orchestration, and validation
 - [`src/service.py`](/home/lingyuzeng/project/mole_antimicrobial_potential/src/service.py)
   - Predictor singleton shared by API and MCP servers
+
+## Batch Data Layout
+
+Batch screening directories under
+[`data/04.new_predictions/`](/home/lingyuzeng/project/mole_antimicrobial_potential/data/04.new_predictions)
+should keep staging assets, benchmark artifacts, and final run outputs
+separated:
+
+- `raw/`
+  - original source files kept for provenance
+- `prepared/`
+  - canonical screening-ready inputs such as Parquet shards
+- `cache/`
+  - transient or staging assets that support runs but are not final outputs
+  - examples: extracted archive trees, copied `inputs/`, copied `prepared/`
+- `benchmarks/`
+  - throughput probes, patch comparison runs, and their logs
+  - these should not be mixed with canonical long-running screening outputs
+- `runs/<run_id>/`
+  - canonical screening outputs intended for downstream consumption
+  - examples: `manifest.json`, `normalized_input.tsv`,
+    `predictions_all.tsv`, `by_source/...`
+
+When reorganizing an old batch directory, prefer moving temporary extraction,
+probe runs, and copied staging assets into `cache/` or `benchmarks/` instead of
+leaving them beside canonical `runs/`.
 
 ## Legacy Compatibility Scripts
 

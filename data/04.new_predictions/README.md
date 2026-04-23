@@ -11,9 +11,26 @@ Keep raw inputs, prepared inputs, and screening runs separated:
 ```text
 data/04.new_predictions/<batch_name>/
   raw/
+  cache/
   prepared/
+  benchmarks/
   runs/<run_id>/
 ```
+
+Directory roles:
+
+- `raw/`
+  - original source files kept for provenance
+- `prepared/`
+  - canonical screening-ready Parquet files or shard directories
+- `cache/`
+  - temporary extraction trees or copied staging assets used to support runs
+  - examples: `cache/extracted/`, `cache/inputs/`, `cache/prepared/`
+- `benchmarks/`
+  - throughput probes, patch comparison runs, and benchmark logs
+  - keep these out of `runs/` so canonical outputs stay clean
+- `runs/<run_id>/`
+  - the actual screening result directory for one run
 
 Typical `mole screen` outputs under `runs/<run_id>/`:
 
@@ -48,8 +65,10 @@ directories.
 1. Keep the original source under `raw/`.
 2. Normalize it to `smiles`, `chem_id`, `source_group`.
 3. Convert large CSV/TSV sources into Parquet shards under `prepared/`.
-4. Point `mole screen` at the prepared Parquet file or directory.
-5. Keep only the run artifacts you actually need under `runs/<run_id>/`.
+4. Put temporary extraction or copied staging assets under `cache/`.
+5. Put throughput probes and patch comparison runs under `benchmarks/`.
+6. Point `mole screen` at the prepared Parquet file or directory.
+7. Keep only canonical screening outputs under `runs/<run_id>/`.
 
 ## Preprocess Large CSV/TSV Inputs
 
@@ -174,3 +193,8 @@ For the full screening parameter handbook, read:
 For file ownership and parameter landing points in code, read:
 
 - [docs/repo_layout.md](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/repo_layout.md)
+
+For one-off scratch test files that should not stay in the maintained test
+suite, use:
+
+- [`.trash/test_ad_hoc/`](/home/lingyuzeng/project/mole_antimicrobial_potential/.trash/test_ad_hoc)
