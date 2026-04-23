@@ -100,6 +100,9 @@ Additional layout notes:
   - Timber conversion/export helper subproject
 - [`docs/references/papers/`](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/references/papers)
   - Local reference PDFs and related literature assets
+- [`docs/superpowers/plans/`](/home/lingyuzeng/project/mole_antimicrobial_potential/docs/superpowers/plans)
+  - Retained implementation plans for substantial refactors and throughput work
+  - Not canonical user-facing docs; use for historical execution context only
 - [`.trash/`](/home/lingyuzeng/project/mole_antimicrobial_potential/.trash)
   - Quarantine area for ad hoc scripts, scratch inputs, and runtime leftovers
   - `.trash/test_ad_hoc/` is the preferred holding area for one-off test probes
