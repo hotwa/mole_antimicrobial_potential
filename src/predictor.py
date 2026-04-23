@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import os
 import re
@@ -20,11 +21,24 @@ from sklearn.preprocessing import OneHotEncoder
 from src.mole_representation import load_pretrained_model, process_representation
 from src.classifier_backend import inspect_classifier_backends, resolve_classifier_backend
 from src.models import MoleculeInfo, MoleculeInput, StatusModel
+from workflow.dataset.dataset_representation import iter_batch_representation
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+NT_NUMBER_PATTERN = re.compile(r".*?\((NT\d+)\)")
+GRAPH_BUILD_PROFILE_SUM_FIELDS = (
+    "graph_items",
+    "rdkit_parse_seconds",
+    "add_hs_seconds",
+    "atom_feature_seconds",
+    "bond_feature_seconds",
+    "graph_total_seconds",
+    "dataloader_setup_seconds",
+    "dataloader_iter_seconds",
+    "model_forward_seconds",
+)
 
 
 def _format_strain_feature_name(strain_name: str) -> str:
@@ -68,6 +82,7 @@ class AntimicrobialPredictor:
         self._gram_dict: Optional[Dict[str, str]] = None
         self.mole_model = None
         self._mole_model_lock = threading.Lock()
+        self._last_profile: Optional[Dict[str, Any]] = None
 
     async def ensure_loaded(self) -> None:
         """Load models and metadata once under concurrency."""
@@ -193,7 +208,15 @@ class AntimicrobialPredictor:
             )
             return self.mole_model
 
-    def _get_mole_representation(self, molecules: List[MoleculeInfo]):
+    def _get_mole_representation(
+        self,
+        molecules: List[MoleculeInfo],
+        num_graph_workers: int | str = "auto",
+        graph_batch_size: int = 1024,
+        prefetch_batches: int = 2,
+        enable_profiling: bool = False,
+        deterministic_representation: bool = False,
+    ):
         smiles = [mol.smiles for mol in molecules]
         chem_ids = [mol.chem_id or f"mol{index + 1}" for index, mol in enumerate(molecules)]
         df = pd.DataFrame({"smiles": smiles, "chem_id": chem_ids})
@@ -204,20 +227,79 @@ class AntimicrobialPredictor:
             pretrained_dir=self.mole_model_path,
             device=self.device,
             model=self._load_mole_model(),
+            num_graph_workers=num_graph_workers,
+            graph_batch_size=graph_batch_size,
+            prefetch_batches=prefetch_batches,
+            validate_smiles=False,
+            enable_profiling=enable_profiling,
+            deterministic_representation=deterministic_representation,
         )
 
+    def _iter_mole_representation_batches(
+        self,
+        molecules: List[MoleculeInfo],
+        num_graph_workers: int | str = "auto",
+        graph_batch_size: int = 1024,
+        prefetch_batches: int = 2,
+        enable_profiling: bool = False,
+        deterministic_representation: bool = False,
+    ):
+        smiles = [mol.smiles for mol in molecules]
+        chem_ids = [mol.chem_id or f"mol{index + 1}" for index, mol in enumerate(molecules)]
+        df = pd.DataFrame({"smiles": smiles, "chem_id": chem_ids})
+        return iter_batch_representation(
+            smile_df=df,
+            dl_model=self._load_mole_model(),
+            column_str="smiles",
+            id_str="chem_id",
+            batch_size=graph_batch_size,
+            device=self.device,
+            num_graph_workers=num_graph_workers,
+            graph_batch_size=graph_batch_size,
+            prefetch_batches=prefetch_batches,
+            enable_profiling=enable_profiling,
+            deterministic_representation=deterministic_representation,
+        )
+
+    def last_profile_snapshot(self) -> Optional[Dict[str, Any]]:
+        if self._last_profile is None:
+            return None
+        return copy.deepcopy(self._last_profile)
+
     def _add_strains(self, chemfeats_df: pd.DataFrame) -> pd.DataFrame:
-        chemfe = chemfeats_df.reset_index().rename(columns={"index": "chem_id"})
-        chemfe["chem_id"] = chemfe["chem_id"].astype(str)
+        if self.strain_ohe is None:
+            raise RuntimeError("Strain OHE data not loaded")
 
-        sohe = self.strain_ohe.reset_index().rename(columns={"index": "strain_name"})
-        xpred = chemfe.merge(sohe, how="cross")
-        xpred["pred_id"] = xpred["chem_id"].str.cat(xpred["strain_name"], sep=":")
+        chem_ids = chemfeats_df.index.astype(str).to_numpy(copy=False)
+        strain_names = self.strain_ohe.index.astype(str).to_numpy(copy=False)
+        xpred_values = self._strain_feature_array(chemfeats_df)
 
-        xpred = xpred.set_index("pred_id")
-        xpred = xpred.drop(columns=["chem_id", "strain_name"])
-        xpred.columns = [str(column) for column in xpred.columns]
-        return xpred
+        pred_ids = np.char.add(
+            np.char.add(np.repeat(chem_ids, len(strain_names)), ":"),
+            np.tile(strain_names, len(chem_ids)),
+        )
+
+        columns = [str(column) for column in chemfeats_df.columns] + [
+            str(column) for column in self.strain_ohe.columns
+        ]
+        return pd.DataFrame(
+            xpred_values,
+            index=pd.Index(pred_ids, name="pred_id"),
+            columns=columns,
+        )
+
+    def _strain_feature_array(self, chemfeats_df: pd.DataFrame) -> np.ndarray:
+        if self.strain_ohe is None:
+            raise RuntimeError("Strain OHE data not loaded")
+
+        chem_values = chemfeats_df.to_numpy(dtype=np.float32, copy=False)
+        strain_values = self.strain_ohe.to_numpy(dtype=np.float32, copy=False)
+        strain_count = len(self.strain_ohe.index)
+        molecule_count = len(chemfeats_df.index)
+
+        expanded_chem = np.repeat(chem_values, strain_count, axis=0)
+        expanded_strains = np.tile(strain_values, (molecule_count, 1))
+        return np.concatenate([expanded_chem, expanded_strains], axis=1)
 
     def _gram_stain(self, label_df: pd.DataFrame) -> pd.DataFrame:
         if self._gram_dict is None:
@@ -225,10 +307,88 @@ class AntimicrobialPredictor:
 
         df_label = label_df.copy()
         df_label["nt_number"] = df_label["strain_name"].apply(
-            lambda x: re.search(r".*?\((NT\d+)\)", x).group(1)
+            lambda x: NT_NUMBER_PATTERN.search(x).group(1)
         )
         df_label["gram_stain"] = df_label["nt_number"].map(self._gram_dict)
         return df_label
+
+    def _resolve_strain_grams(self, strain_names: np.ndarray) -> np.ndarray:
+        if self._gram_dict is None:
+            raise RuntimeError("Gram stain data not loaded")
+
+        gram_by_strain: dict[str, str | None] = {}
+        resolved = np.empty(len(strain_names), dtype=object)
+        for index, strain_name in enumerate(strain_names):
+            strain_name_key = str(strain_name)
+            gram = gram_by_strain.get(strain_name_key)
+            if gram is None and strain_name_key not in gram_by_strain:
+                nt_number = NT_NUMBER_PATTERN.search(strain_name_key).group(1)
+                gram = self._gram_dict.get(nt_number)
+                gram_by_strain[strain_name_key] = gram
+            resolved[index] = gram_by_strain[strain_name_key]
+        return resolved
+
+    def _aggregate_scores_from_matrix(
+        self,
+        probability_matrix: np.ndarray,
+        growth_inhibition_matrix: np.ndarray,
+        chem_ids: np.ndarray,
+        strain_names: np.ndarray,
+    ) -> pd.DataFrame:
+        probabilities = np.asarray(probability_matrix)
+        growth_inhibition = np.asarray(growth_inhibition_matrix)
+        chem_ids_array = np.asarray(chem_ids, dtype=object)
+        strain_names_array = np.asarray(strain_names, dtype=object)
+
+        if probabilities.ndim != 2:
+            raise ValueError("probability_matrix must be a 2D array")
+        if growth_inhibition.shape != probabilities.shape:
+            raise ValueError("growth_inhibition_matrix must match probability_matrix shape")
+        if probabilities.shape[0] != len(chem_ids_array):
+            raise ValueError("chem_ids length must match probability_matrix row count")
+        if probabilities.shape[1] != len(strain_names_array):
+            raise ValueError("strain_names length must match probability_matrix column count")
+
+        gram_by_strain = self._resolve_strain_grams(strain_names_array)
+        negative_mask = gram_by_strain == "negative"
+        positive_mask = gram_by_strain == "positive"
+        if not negative_mask.any():
+            raise KeyError("apscore_gnegative")
+        if not positive_mask.any():
+            raise KeyError("apscore_gpositive")
+
+        order = np.argsort(chem_ids_array.astype(str), kind="stable")
+        sorted_chem_ids = chem_ids_array[order].astype(str)
+        sorted_probabilities = probabilities[order]
+        sorted_growth_inhibition = growth_inhibition[order]
+        inhibition_dtype = growth_inhibition.dtype
+
+        def _log_gmean_rows(values: np.ndarray) -> np.ndarray:
+            output_dtype = values.dtype if np.issubdtype(values.dtype, np.floating) else np.float64
+            with np.errstate(divide="ignore", invalid="ignore"):
+                return np.fromiter(
+                    (float(np.log(gmean(row))) for row in values),
+                    dtype=output_dtype,
+                    count=values.shape[0],
+                )
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            apscore_total = _log_gmean_rows(sorted_probabilities)
+            apscore_gnegative = _log_gmean_rows(sorted_probabilities[:, negative_mask])
+            apscore_gpositive = _log_gmean_rows(sorted_probabilities[:, positive_mask])
+
+        result = pd.DataFrame(
+            {
+                "apscore_total": apscore_total,
+                "apscore_gnegative": apscore_gnegative,
+                "apscore_gpositive": apscore_gpositive,
+                "ginhib_total": sorted_growth_inhibition.sum(axis=1, dtype=np.int64).astype(inhibition_dtype, copy=False),
+                "ginhib_gnegative": sorted_growth_inhibition[:, negative_mask].sum(axis=1, dtype=np.int64).astype(inhibition_dtype, copy=False),
+                "ginhib_gpositive": sorted_growth_inhibition[:, positive_mask].sum(axis=1, dtype=np.int64).astype(inhibition_dtype, copy=False),
+            },
+            index=pd.Index(sorted_chem_ids, name="chem_id"),
+        )
+        return result
 
     def _antimicrobial_potential(self, score_df: pd.DataFrame) -> pd.DataFrame:
         split = score_df["pred_id"].astype(str).str.rsplit(":", n=1, expand=True)
@@ -267,49 +427,274 @@ class AntimicrobialPredictor:
 
         return apscore_total.join(apscore_gram).join(inhibted_total).join(inhibted_gram)
 
-    async def predict(self, input_data: MoleculeInput) -> List[Dict[str, Any]]:
-        """Predict antimicrobial activity and return items only."""
-        if not self._model_loaded:
-            raise RuntimeError("Model not loaded. Call ensure_loaded() first.")
+    def _new_graph_build_profile(self) -> Dict[str, Any]:
+        return {
+            "graph_items": 0,
+            "rdkit_parse_seconds": 0.0,
+            "add_hs_seconds": 0.0,
+            "atom_feature_seconds": 0.0,
+            "bond_feature_seconds": 0.0,
+            "graph_total_seconds": 0.0,
+            "dataloader_setup_seconds": 0.0,
+            "dataloader_iter_seconds": 0.0,
+            "model_forward_seconds": 0.0,
+            "graph_batch_size": None,
+            "graph_workers": None,
+        }
 
-        normalized = input_data.normalize()
+    def _merge_graph_build_profile(
+        self,
+        total_profile: Optional[Dict[str, Any]],
+        batch_profile: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if batch_profile is None:
+            return total_profile
+
+        if total_profile is None:
+            total_profile = self._new_graph_build_profile()
+
+        for field in GRAPH_BUILD_PROFILE_SUM_FIELDS:
+            total_profile[field] += batch_profile.get(field, 0.0)
+
+        if "graph_batch_size" in batch_profile:
+            total_profile["graph_batch_size"] = batch_profile["graph_batch_size"]
+        if "graph_workers" in batch_profile:
+            total_profile["graph_workers"] = batch_profile["graph_workers"]
+
+        return total_profile
+
+    def _predict_aggregate_streaming_sync(
+        self,
+        normalized: MoleculeInput,
+        num_graph_workers: int | str,
+        graph_batch_size: int,
+        prefetch_batches: int,
+        enable_profiling: bool,
+        deterministic_representation: bool,
+    ) -> tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
         molecules = normalized.molecules or []
         if not molecules:
             raise ValueError("No molecules provided for prediction")
 
+        strain_names = self.strain_ohe.index.astype(str).to_numpy(copy=False)
+        iterator = self._iter_mole_representation_batches(
+            molecules,
+            num_graph_workers=num_graph_workers,
+            graph_batch_size=graph_batch_size,
+            prefetch_batches=prefetch_batches,
+            enable_profiling=enable_profiling,
+            deterministic_representation=deterministic_representation,
+        )
+
+        representation_seconds = 0.0
+        expand_seconds = 0.0
+        xgboost_seconds = 0.0
+        prediction_frame_seconds = 0.0
+        growth_inhibition_seconds = 0.0
+        aggregate_scores_seconds = 0.0
+        result_records_seconds = 0.0
+        first_result_latency_seconds: Optional[float] = None
+        graph_build_profile: Optional[Dict[str, Any]] = None
+        streaming_batches: list[Dict[str, Any]] = []
+        aggregate_batches: list[pd.DataFrame] = []
+
+        pipeline_start = time.perf_counter()
+        while True:
+            representation_batch_start = time.perf_counter()
+            try:
+                batch = next(iterator)
+            except StopIteration:
+                break
+            representation_batch_seconds = time.perf_counter() - representation_batch_start
+            representation_seconds += representation_batch_seconds
+
+            representation_df = batch["embedding_batch"]
+
+            expand_start = time.perf_counter()
+            x_input_values = self._strain_feature_array(representation_df)
+            expand_seconds += time.perf_counter() - expand_start
+
+            classifier_batch_start = time.perf_counter()
+            y_pred = self.model.predict_proba(x_input_values)
+            classifier_batch_seconds = time.perf_counter() - classifier_batch_start
+            xgboost_seconds += classifier_batch_seconds
+
+            y_pred_array = np.asarray(y_pred)
+            probability_values = y_pred_array[:, 1]
+
+            growth_inhibition_start = time.perf_counter()
+            chem_ids = representation_df.index.astype(str).to_numpy(copy=False)
+            probability_matrix = probability_values.reshape(len(chem_ids), len(strain_names))
+            growth_inhibition_matrix = (
+                probability_matrix >= normalized.app_threshold
+            ).astype(np.int64, copy=False)
+            growth_inhibition_seconds += time.perf_counter() - growth_inhibition_start
+
+            aggregate_scores_start = time.perf_counter()
+            batch_agg_df = self._aggregate_scores_from_matrix(
+                probability_matrix=probability_matrix,
+                growth_inhibition_matrix=growth_inhibition_matrix,
+                chem_ids=chem_ids,
+                strain_names=strain_names,
+            )
+            batch_agg_df["broad_spectrum"] = (
+                batch_agg_df["ginhib_total"].to_numpy(copy=False) >= normalized.min_nkill
+            ).astype(np.int64, copy=False)
+            aggregate_batch_seconds = time.perf_counter() - aggregate_scores_start
+            aggregate_scores_seconds += aggregate_batch_seconds
+            aggregate_batches.append(batch_agg_df)
+
+            if first_result_latency_seconds is None:
+                first_result_latency_seconds = time.perf_counter() - pipeline_start
+
+            if enable_profiling:
+                graph_build_profile = self._merge_graph_build_profile(
+                    graph_build_profile,
+                    batch.get("profiling"),
+                )
+                streaming_batches.append(
+                    {
+                        "batch_index": batch["batch_index"],
+                        "chem_ids": list(batch["chem_ids"]),
+                        "representation_batch_production_seconds": representation_batch_seconds,
+                        "classifier_batch_inference_seconds": classifier_batch_seconds,
+                        "aggregate_accumulate_seconds": aggregate_batch_seconds,
+                    }
+                )
+
+        if not aggregate_batches:
+            raise ValueError("No molecules provided for prediction")
+
+        agg_df = pd.concat(aggregate_batches)
+        order = np.argsort(agg_df.index.astype(str).to_numpy(copy=False), kind="stable")
+        agg_df = agg_df.take(order)
+
+        result_records_start = time.perf_counter()
+        records = agg_df.reset_index().to_dict(orient="records")
+        result_records_seconds += time.perf_counter() - result_records_start
+
+        profile = None
+        if enable_profiling:
+            profile = {
+                "representation_seconds": representation_seconds,
+                "strain_expand_seconds": expand_seconds,
+                "xgboost_seconds": xgboost_seconds,
+                "prediction_frame_seconds": prediction_frame_seconds,
+                "growth_inhibition_seconds": growth_inhibition_seconds,
+                "aggregate_scores_seconds": aggregate_scores_seconds,
+                "result_records_seconds": result_records_seconds,
+                "graph_build": graph_build_profile,
+                "first_result_latency_seconds": first_result_latency_seconds or 0.0,
+                "streaming_batches": streaming_batches,
+            }
+
+        return records, profile
+
+    async def predict(
+        self,
+        input_data: MoleculeInput,
+        num_graph_workers: int | str = "auto",
+        graph_batch_size: int = 1024,
+        prefetch_batches: int = 2,
+        already_normalized: bool = False,
+        enable_profiling: bool = False,
+        deterministic_representation: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Predict antimicrobial activity and return items only."""
+        if not self._model_loaded:
+            raise RuntimeError("Model not loaded. Call ensure_loaded() first.")
+
+        normalized = input_data if already_normalized else input_data.normalize()
+        molecules = normalized.molecules or []
+        if not molecules:
+            raise ValueError("No molecules provided for prediction")
+
+        self._last_profile = None
         loop = asyncio.get_running_loop()
+        if normalized.aggregate_scores:
+            records, profile = await loop.run_in_executor(
+                None,
+                self._predict_aggregate_streaming_sync,
+                normalized,
+                num_graph_workers,
+                graph_batch_size,
+                prefetch_batches,
+                enable_profiling,
+                deterministic_representation,
+            )
+
+            if enable_profiling:
+                self._last_profile = profile
+            return records
+
         try:
+            representation_start = time.perf_counter()
             mole_representation = await asyncio.wait_for(
-                loop.run_in_executor(None, self._get_mole_representation, molecules),
+                loop.run_in_executor(
+                    None,
+                    self._get_mole_representation,
+                    molecules,
+                    num_graph_workers,
+                    graph_batch_size,
+                    prefetch_batches,
+                    enable_profiling,
+                    deterministic_representation,
+                ),
                 timeout=60,
             )
+            representation_seconds = time.perf_counter() - representation_start
         except asyncio.TimeoutError as exc:
             raise TimeoutError("MolE representation generation timeout") from exc
 
+        expand_start = time.perf_counter()
         x_input = self._add_strains(mole_representation)
+        expand_seconds = time.perf_counter() - expand_start
 
         try:
+            xgboost_start = time.perf_counter()
+            x_input_values = x_input.to_numpy(dtype=np.float32, copy=False)
             y_pred = await asyncio.wait_for(
-                loop.run_in_executor(None, self.model.predict_proba, x_input),
+                loop.run_in_executor(None, self.model.predict_proba, x_input_values),
                 timeout=30,
             )
+            xgboost_seconds = time.perf_counter() - xgboost_start
         except asyncio.TimeoutError as exc:
             raise TimeoutError("Prediction timeout") from exc
 
-        pred_df = pd.DataFrame(y_pred, columns=["0", "1"], index=x_input.index)
-        pred_df["growth_inhibition"] = pred_df["1"].apply(
-            lambda x: 1 if x >= normalized.app_threshold else 0
-        )
+        y_pred_array = np.asarray(y_pred)
+        probability_values = y_pred_array[:, 1]
+        chem_ids = mole_representation.index.astype(str).to_numpy(copy=False)
+        aggregate_scores_seconds = 0.0
+        result_records_seconds = 0.0
 
-        if normalized.aggregate_scores:
-            pred_df = pred_df.reset_index()
-            agg_df = self._antimicrobial_potential(pred_df)
-            agg_df["broad_spectrum"] = agg_df["ginhib_total"].apply(
-                lambda x: 1 if x >= normalized.min_nkill else 0
-            )
-            return agg_df.reset_index().to_dict(orient="records")
+        prediction_frame_start = time.perf_counter()
+        pred_df = pd.DataFrame(y_pred_array, columns=["0", "1"], index=x_input.index)
+        prediction_frame_seconds = time.perf_counter() - prediction_frame_start
+
+        growth_inhibition_start = time.perf_counter()
+        growth_inhibition = (
+            probability_values >= normalized.app_threshold
+        ).astype(np.int64, copy=False)
+        pred_df["growth_inhibition"] = growth_inhibition
+        growth_inhibition_seconds = time.perf_counter() - growth_inhibition_start
 
         pred_df = pred_df.drop(columns=["0"]).rename(
             columns={"1": "antimicrobial_predictive_probability"}
         )
-        return pred_df.reset_index().to_dict(orient="records")
+        result_records_start = time.perf_counter()
+        records = pred_df.reset_index().to_dict(orient="records")
+        result_records_seconds = time.perf_counter() - result_records_start
+
+        if enable_profiling:
+            self._last_profile = {
+                "representation_seconds": representation_seconds,
+                "strain_expand_seconds": expand_seconds,
+                "xgboost_seconds": xgboost_seconds,
+                "prediction_frame_seconds": prediction_frame_seconds,
+                "growth_inhibition_seconds": growth_inhibition_seconds,
+                "aggregate_scores_seconds": aggregate_scores_seconds,
+                "result_records_seconds": result_records_seconds,
+                "graph_build": copy.deepcopy(mole_representation.attrs.get("profiling")),
+            }
+
+        return records

@@ -105,7 +105,10 @@ def inspect_classifier_backends(
     elif backend_preference == "pickle":
         selected_backend = "pickle"
     else:
-        selected_backend = "timber" if timber_available else "pickle"
+        # The original MolE prediction path uses the pickle/XGBoost model.
+        # Keep auto mode canonical and fast; Timber remains an explicit
+        # portability option when the Python XGBoost runtime is unavailable.
+        selected_backend = "pickle" if pickle_available else "timber"
 
     return BackendProbe(
         preference=backend_preference,

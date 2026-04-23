@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
+import numpy as np
+import pandas as pd
 import torch
 
 
@@ -62,6 +66,10 @@ class TestBatchSizeSelection(unittest.TestCase):
         )
         self.assertLessEqual(bs, 512)
 
+    def test_large_gpu_not_capped_by_2048(self) -> None:
+        from src.prediction_scheduler import DEFAULT_MAX_BATCH_SIZE
+        self.assertGreater(DEFAULT_MAX_BATCH_SIZE, 2048, "DEFAULT_MAX_BATCH_SIZE must be raised to allow large GPUs to burst")
+
     def test_batch_size_at_least_one(self) -> None:
         from src.prediction_scheduler import PredictionScheduler
 
@@ -84,7 +92,7 @@ class TestOOMBackoff(unittest.TestCase):
     def _oom_then_ok(self, call_count_box: list):
         """Return a mock predictor whose predict() raises OOM on first call."""
 
-        async def _predict(input_data):
+        async def _predict(input_data, **kwargs):
             call_count_box[0] += 1
             if call_count_box[0] == 1:
                 raise torch.cuda.OutOfMemoryError("CUDA out of memory")  # type: ignore[attr-defined]
@@ -95,6 +103,49 @@ class TestOOMBackoff(unittest.TestCase):
         predictor.predict.side_effect = _predict
         predictor.ensure_loaded = mock.AsyncMock()
         return predictor
+
+    def test_oom_splits_batch_correctly(self) -> None:
+        from src.prediction_scheduler import PredictionScheduler
+        from src.models import MoleculeInfo
+
+        call_args_box = []
+
+        async def _predict(input_data, **kwargs):
+            call_args_box.append(len(input_data.molecules))
+            if len(input_data.molecules) > 2:
+                raise torch.cuda.OutOfMemoryError("CUDA out of memory")  # type: ignore[attr-defined]
+            return [{"chem_id": m.chem_id, "apscore_total": -1.5} for m in input_data.molecules]
+
+        mock_predictor = mock.AsyncMock()
+        mock_predictor.predict.side_effect = _predict
+        mock_predictor.ensure_loaded = mock.AsyncMock()
+
+        sched = PredictionScheduler(
+            predictor=mock_predictor,
+            initial_batch_size=4,
+            max_batch_size=4,
+            min_batch_size=1,
+            target_memory_fraction=0.80,
+            deterministic_representation=True,
+        )
+
+        molecules = [MoleculeInfo(smiles="CCO", chem_id=f"mol{i}") for i in range(4)]
+
+        async def _run_predict():
+            return await sched.predict_molecules(
+                molecules=molecules,
+                aggregate_scores=True,
+                app_threshold=0.04374,
+                min_nkill=10,
+            )
+
+        result = _run(_run_predict())
+        # First call size 4 -> OOM. Batch size halves to 2.
+        # Next call size 2 -> OK.
+        # Next call size 2 -> OK.
+        self.assertEqual(call_args_box, [4, 2, 2])
+        self.assertEqual(sched.current_batch_size, 2)
+        self.assertEqual(len(result), 4)
 
     def test_oom_halves_batch_and_retries(self) -> None:
         from src.prediction_scheduler import PredictionScheduler
@@ -132,7 +183,7 @@ class TestOOMBackoff(unittest.TestCase):
         from src.prediction_scheduler import PredictionScheduler
         from src.models import MoleculeInfo
 
-        async def _always_oom(input_data):
+        async def _always_oom(input_data, **kwargs):
             raise torch.cuda.OutOfMemoryError("CUDA out of memory")  # type: ignore[attr-defined]
 
         mock_predictor = mock.AsyncMock()
@@ -172,7 +223,7 @@ class TestModelReuse(unittest.TestCase):
         from src.prediction_scheduler import PredictionScheduler
         from src.models import MoleculeInfo
 
-        async def _fake_predict(input_data):
+        async def _fake_predict(input_data, **kwargs):
             return [{"chem_id": m.chem_id, "apscore_total": -1.0} for m in input_data.molecules or []]
 
         mock_predictor = mock.AsyncMock()
@@ -185,6 +236,7 @@ class TestModelReuse(unittest.TestCase):
             max_batch_size=4,
             min_batch_size=1,
             target_memory_fraction=0.80,
+            deterministic_representation=True,
         )
 
         molecules = [MoleculeInfo(smiles="CCO", chem_id=f"mol{i}") for i in range(10)]
@@ -206,6 +258,325 @@ class TestModelReuse(unittest.TestCase):
         _run(_run_two_batches())
 
         mock_predictor.ensure_loaded.assert_called_once()
+
+    def test_graph_construction_settings_are_forwarded_to_predictor(self) -> None:
+        from src.prediction_scheduler import PredictionScheduler
+        from src.models import MoleculeInfo
+
+        mock_predictor = mock.AsyncMock()
+        mock_predictor.ensure_loaded = mock.AsyncMock()
+        mock_predictor.predict.return_value = [{"chem_id": "mol1", "apscore_total": -1.0}]
+
+        sched = PredictionScheduler(
+            predictor=mock_predictor,
+            initial_batch_size=4,
+            max_batch_size=4,
+            min_batch_size=1,
+            target_memory_fraction=0.80,
+            deterministic_representation=True,
+        )
+
+        molecules = [MoleculeInfo(smiles="CCO", chem_id="mol1")]
+
+        async def _run_predict():
+            return await sched.predict_molecules(
+                molecules=molecules,
+                aggregate_scores=True,
+                app_threshold=0.04374,
+                min_nkill=10,
+                num_graph_workers=3,
+                graph_batch_size=64,
+                prefetch_batches=5,
+            )
+
+        _run(_run_predict())
+
+        _, kwargs = mock_predictor.predict.call_args
+        self.assertEqual(kwargs["num_graph_workers"], 3)
+        self.assertEqual(kwargs["graph_batch_size"], 64)
+        self.assertEqual(kwargs["prefetch_batches"], 5)
+        self.assertTrue(kwargs["deterministic_representation"])
+
+    def test_auto_tune_warmup_uses_scheduler_graph_settings(self) -> None:
+        from src.prediction_scheduler import PredictionScheduler
+
+        mock_predictor = mock.AsyncMock()
+        mock_predictor.ensure_loaded = mock.AsyncMock()
+        mock_predictor.device = "cuda:1"
+        mock_predictor.predict.return_value = [{"chem_id": "warmup1", "apscore_total": -1.0}]
+
+        sched = PredictionScheduler(
+            predictor=mock_predictor,
+            initial_batch_size=None,
+            max_batch_size=256,
+            min_batch_size=1,
+            target_memory_fraction=0.80,
+            num_graph_workers=7,
+            graph_batch_size=96,
+            prefetch_batches=4,
+            deterministic_representation=True,
+        )
+
+        with mock.patch("torch.cuda.is_available", return_value=True), \
+             mock.patch("torch.cuda.reset_peak_memory_stats"), \
+             mock.patch("torch.cuda.memory_allocated", return_value=100), \
+             mock.patch("torch.cuda.max_memory_allocated", return_value=200), \
+             mock.patch("torch.cuda.mem_get_info", return_value=(1024 * 1024 * 1024, 2 * 1024 * 1024 * 1024)):
+            batch_size = _run(sched._auto_tune_batch_size(app_threshold=0.04374, min_nkill=10))
+
+        self.assertGreaterEqual(batch_size, 1)
+        _, kwargs = mock_predictor.predict.call_args
+        self.assertEqual(kwargs["num_graph_workers"], 7)
+        self.assertEqual(kwargs["graph_batch_size"], 96)
+        self.assertEqual(kwargs["prefetch_batches"], 4)
+        self.assertTrue(kwargs["deterministic_representation"])
+
+    def test_predict_molecules_preserves_multi_chunk_result_order(self) -> None:
+        from src.prediction_scheduler import PredictionScheduler
+        from src.models import MoleculeInfo
+
+        async def _fake_predict(input_data, **kwargs):
+            return [
+                {"chem_id": molecule.chem_id, "pred_id": f"{molecule.chem_id}:strain1"}
+                for molecule in input_data.molecules or []
+            ]
+
+        mock_predictor = mock.AsyncMock()
+        mock_predictor.predict.side_effect = _fake_predict
+        mock_predictor.ensure_loaded = mock.AsyncMock()
+
+        sched = PredictionScheduler(
+            predictor=mock_predictor,
+            initial_batch_size=2,
+            max_batch_size=2,
+            min_batch_size=1,
+            target_memory_fraction=0.80,
+        )
+
+        molecules = [MoleculeInfo(smiles="CCO", chem_id=f"mol{i}") for i in range(5)]
+
+        result = _run(
+            sched.predict_molecules(
+                molecules=molecules,
+                aggregate_scores=False,
+                app_threshold=0.04374,
+                min_nkill=10,
+            )
+        )
+
+        self.assertEqual(
+            [item["pred_id"] for item in result],
+            [f"mol{i}:strain1" for i in range(5)],
+        )
+        self.assertEqual(len(result), 5)
+        self.assertEqual(len({item["chem_id"] for item in result}), 5)
+
+    def test_predict_molecules_normalizes_request_once(self) -> None:
+        from src.models import MoleculeInfo, MoleculeInput
+        from src.prediction_scheduler import PredictionScheduler
+        from src.predictor import AntimicrobialPredictor
+
+        fake_probe = SimpleNamespace(
+            preference="pickle",
+            pickle_path=Path("/tmp/fake_model.pkl"),
+            timber_model_dir=Path("/tmp/fake_timber"),
+        )
+
+        with mock.patch("src.predictor.inspect_classifier_backends", return_value=fake_probe):
+            predictor = AntimicrobialPredictor()
+
+        predictor._model_loaded = True
+        predictor.ensure_loaded = mock.AsyncMock()
+        predictor._get_mole_representation = mock.Mock(
+            return_value=pd.DataFrame({"feat": [1.0]}, index=["mol1"])
+        )
+        predictor._add_strains = mock.Mock(
+            return_value=pd.DataFrame(
+                {"feature": [1.0]},
+                index=["mol1:Strain A (NT1)"],
+            )
+        )
+        predictor.model = mock.Mock()
+        predictor.model.predict_proba = mock.Mock(return_value=np.array([[0.2, 0.8]]))
+
+        sched = PredictionScheduler(
+            predictor=predictor,
+            initial_batch_size=4,
+            max_batch_size=4,
+            min_batch_size=1,
+            target_memory_fraction=0.80,
+        )
+
+        original_normalize = MoleculeInput.normalize
+        with mock.patch.object(
+            MoleculeInput,
+            "normalize",
+            autospec=True,
+            side_effect=original_normalize,
+        ) as normalize_mock:
+            _run(
+                sched.predict_molecules(
+                    molecules=[MoleculeInfo(smiles="CCO", chem_id="mol1")],
+                    aggregate_scores=False,
+                    app_threshold=0.04374,
+                    min_nkill=10,
+                )
+            )
+
+        self.assertEqual(normalize_mock.call_count, 1)
+
+    def test_predict_molecules_records_last_profile_when_profiling_enabled(self) -> None:
+        from src.prediction_scheduler import PredictionScheduler
+        from src.models import MoleculeInfo
+
+        mock_predictor = mock.AsyncMock()
+        mock_predictor.ensure_loaded = mock.AsyncMock()
+        mock_predictor.predict = mock.AsyncMock(return_value=[{"chem_id": "mol1", "apscore_total": -1.0}])
+        mock_predictor.last_profile_snapshot = mock.Mock(
+            return_value={
+                "representation_seconds": 1.0,
+                "prediction_frame_seconds": 0.2,
+                "growth_inhibition_seconds": 0.1,
+                "aggregate_scores_seconds": 0.3,
+                "xgboost_seconds": 0.5,
+                "graph_build": {"graph_total_seconds": 0.25, "graph_items": 1},
+            }
+        )
+
+        sched = PredictionScheduler(
+            predictor=mock_predictor,
+            initial_batch_size=4,
+            max_batch_size=4,
+            min_batch_size=1,
+            target_memory_fraction=0.80,
+        )
+
+        _run(
+            sched.predict_molecules(
+                molecules=[MoleculeInfo(smiles="CCO", chem_id="mol1")],
+                aggregate_scores=True,
+                app_threshold=0.04374,
+                min_nkill=10,
+                enable_profiling=True,
+            )
+        )
+
+        _, kwargs = mock_predictor.predict.call_args
+        self.assertTrue(kwargs["enable_profiling"])
+        self.assertEqual(
+            sched.runtime_snapshot()["last_profile"]["graph_build"]["graph_items"],
+            1,
+        )
+        self.assertAlmostEqual(
+            sched.runtime_snapshot()["last_profile"]["aggregate_scores_seconds"],
+            0.3,
+        )
+
+    def test_predict_molecules_aggregates_profiles_across_internal_chunks(self) -> None:
+        from src.prediction_scheduler import PredictionScheduler
+        from src.models import MoleculeInfo
+
+        async def _fake_predict(input_data, **kwargs):
+            return [{"chem_id": m.chem_id, "apscore_total": -1.0} for m in input_data.molecules]
+
+        mock_predictor = mock.AsyncMock()
+        mock_predictor.ensure_loaded = mock.AsyncMock()
+        mock_predictor.predict = mock.AsyncMock(side_effect=_fake_predict)
+        mock_predictor.last_profile_snapshot = mock.Mock(
+            side_effect=[
+                {
+                    "representation_seconds": 1.0,
+                    "strain_expand_seconds": 0.1,
+                    "prediction_frame_seconds": 0.2,
+                    "growth_inhibition_seconds": 0.05,
+                    "aggregate_scores_seconds": 0.3,
+                    "xgboost_seconds": 0.5,
+                    "graph_build": {
+                        "graph_items": 2,
+                        "rdkit_parse_seconds": 0.2,
+                        "add_hs_seconds": 0.1,
+                        "atom_feature_seconds": 0.3,
+                        "bond_feature_seconds": 0.4,
+                        "graph_total_seconds": 1.0,
+                        "dataloader_iter_seconds": 1.1,
+                        "model_forward_seconds": 0.2,
+                        "graph_batch_size": 1024,
+                        "graph_workers": 8,
+                    },
+                },
+                {
+                    "representation_seconds": 2.0,
+                    "strain_expand_seconds": 0.2,
+                    "prediction_frame_seconds": 0.3,
+                    "growth_inhibition_seconds": 0.06,
+                    "aggregate_scores_seconds": 0.4,
+                    "xgboost_seconds": 0.6,
+                    "graph_build": {
+                        "graph_items": 2,
+                        "rdkit_parse_seconds": 0.3,
+                        "add_hs_seconds": 0.2,
+                        "atom_feature_seconds": 0.4,
+                        "bond_feature_seconds": 0.5,
+                        "graph_total_seconds": 1.2,
+                        "dataloader_iter_seconds": 1.3,
+                        "model_forward_seconds": 0.3,
+                        "graph_batch_size": 1024,
+                        "graph_workers": 8,
+                    },
+                },
+                {
+                    "representation_seconds": 3.0,
+                    "strain_expand_seconds": 0.3,
+                    "prediction_frame_seconds": 0.4,
+                    "growth_inhibition_seconds": 0.07,
+                    "aggregate_scores_seconds": 0.5,
+                    "xgboost_seconds": 0.7,
+                    "graph_build": {
+                        "graph_items": 1,
+                        "rdkit_parse_seconds": 0.4,
+                        "add_hs_seconds": 0.3,
+                        "atom_feature_seconds": 0.5,
+                        "bond_feature_seconds": 0.6,
+                        "graph_total_seconds": 1.4,
+                        "dataloader_iter_seconds": 1.5,
+                        "model_forward_seconds": 0.4,
+                        "graph_batch_size": 1024,
+                        "graph_workers": 8,
+                    },
+                },
+            ]
+        )
+
+        sched = PredictionScheduler(
+            predictor=mock_predictor,
+            initial_batch_size=2,
+            max_batch_size=2,
+            min_batch_size=1,
+            target_memory_fraction=0.80,
+        )
+
+        _run(
+            sched.predict_molecules(
+                molecules=[MoleculeInfo(smiles="CCO", chem_id=f"mol{i}") for i in range(5)],
+                aggregate_scores=True,
+                app_threshold=0.04374,
+                min_nkill=10,
+                enable_profiling=True,
+            )
+        )
+
+        profile = sched.runtime_snapshot()["last_profile"]
+        self.assertEqual(profile["representation_seconds"], 6.0)
+        self.assertAlmostEqual(profile["strain_expand_seconds"], 0.6)
+        self.assertEqual(profile["xgboost_seconds"], 1.8)
+        self.assertAlmostEqual(profile["prediction_frame_seconds"], 0.9)
+        self.assertAlmostEqual(profile["growth_inhibition_seconds"], 0.18)
+        self.assertAlmostEqual(profile["aggregate_scores_seconds"], 1.2)
+        self.assertEqual(profile["graph_build"]["graph_items"], 5)
+        self.assertAlmostEqual(profile["graph_build"]["graph_total_seconds"], 3.6)
+        self.assertAlmostEqual(profile["graph_build"]["bond_feature_seconds"], 1.5)
+        self.assertEqual(profile["graph_build"]["graph_batch_size"], 1024)
+        self.assertEqual(profile["graph_build"]["graph_workers"], 8)
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +647,48 @@ class TestRuntimeSnapshot(unittest.TestCase):
 
         snap = sched.runtime_snapshot()
         self.assertEqual(snap["used_cuda"], torch.cuda.is_available())
+
+    def test_snapshot_reports_cpu_device_when_cuda_unavailable(self) -> None:
+        from src.prediction_scheduler import PredictionScheduler
+
+        mock_predictor = mock.AsyncMock()
+        mock_predictor.ensure_loaded = mock.AsyncMock()
+
+        sched = PredictionScheduler(
+            predictor=mock_predictor,
+            initial_batch_size=32,
+            max_batch_size=256,
+            min_batch_size=1,
+            target_memory_fraction=0.80,
+        )
+
+        with mock.patch("torch.cuda.is_available", return_value=False):
+            snap = sched.runtime_snapshot()
+
+        self.assertEqual(snap["device"], "cpu")
+
+    def test_snapshot_prefers_predictor_device_string(self) -> None:
+        from src.prediction_scheduler import PredictionScheduler
+
+        mock_predictor = mock.AsyncMock()
+        mock_predictor.ensure_loaded = mock.AsyncMock()
+        mock_predictor.device = "cuda:1"
+
+        sched = PredictionScheduler(
+            predictor=mock_predictor,
+            initial_batch_size=32,
+            max_batch_size=256,
+            min_batch_size=1,
+            target_memory_fraction=0.80,
+        )
+
+        with mock.patch("torch.cuda.is_available", return_value=True), \
+             mock.patch("torch.cuda.mem_get_info", return_value=(0, 0)), \
+             mock.patch("torch.cuda.get_device_name", return_value="fake-gpu"), \
+             mock.patch("torch.cuda.current_device", return_value=0):
+            snap = sched.runtime_snapshot()
+
+        self.assertEqual(snap["device"], "cuda:1")
 
 
 if __name__ == "__main__":  # pragma: no cover

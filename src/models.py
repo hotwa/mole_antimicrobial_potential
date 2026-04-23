@@ -118,10 +118,21 @@ class MoleculeInput(BaseModel):
     def normalize(self) -> "MoleculeInput":
         """Normalize input into a molecules list with default chem_id values."""
         if self.molecules is not None:
+            if (
+                self.smiles is None
+                and self.chem_id is None
+                and all(molecule.chem_id for molecule in self.molecules)
+            ):
+                _ensure_unique_chem_ids(self.molecules)
+                return self
+
             normalized = []
             for index, molecule in enumerate(self.molecules, start=1):
                 chem_id = molecule.chem_id or f"mol{index}"
-                normalized.append(MoleculeInfo(smiles=molecule.smiles, chem_id=chem_id))
+                if molecule.chem_id == chem_id:
+                    normalized.append(molecule)
+                else:
+                    normalized.append(molecule.model_copy(update={"chem_id": chem_id}))
             _ensure_unique_chem_ids(normalized)
             return MoleculeInput(
                 molecules=normalized,
@@ -146,7 +157,7 @@ class MoleculeInput(BaseModel):
             )
 
         molecules = [
-            MoleculeInfo(smiles=smiles, chem_id=chem_id)
+            MoleculeInfo.model_construct(smiles=smiles, chem_id=chem_id)
             for smiles, chem_id in zip(smiles_list, chem_id_list)
         ]
         _ensure_unique_chem_ids(molecules)

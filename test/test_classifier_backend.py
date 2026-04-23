@@ -20,13 +20,29 @@ from src.classifier_backend import (
 
 
 class TestClassifierBackend(unittest.TestCase):
-    def test_auto_prefers_timber_when_artifact_exists(self):
+    def test_auto_prefers_pickle_when_pickle_is_available(self):
         probe = inspect_classifier_backends()
-        if not probe.timber_available:
-            self.skipTest("Timber artifact is not available on this machine")
+        if not probe.pickle_available:
+            self.skipTest("Pickle model is not available on this machine")
 
         backend = resolve_classifier_backend()
-        self.assertEqual(backend.name, "timber")
+        self.assertEqual(backend.name, "pickle")
+
+    def test_auto_falls_back_to_timber_when_pickle_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            timber_dir = Path(tmpdir)
+            (timber_dir / "compiled").mkdir(parents=True)
+            timber_lib = timber_dir / "compiled" / "libtimber_model.so"
+            timber_lib.write_bytes(b"stub")
+
+            probe = inspect_classifier_backends(
+                pickle_path=timber_dir / "missing.pkl",
+                timber_model_dir=timber_dir,
+            )
+
+        self.assertFalse(probe.pickle_available)
+        self.assertTrue(probe.timber_available)
+        self.assertEqual(probe.selected_backend, "timber")
 
     def test_auto_falls_back_to_pickle_when_timber_missing(self):
         with tempfile.TemporaryDirectory() as tmpdir:

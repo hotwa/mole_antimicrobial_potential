@@ -52,6 +52,28 @@ def parse_arguments():
     # Device
     parser.add_argument("-d", "--device", help="Device where the pre-trained model is loaded. Can be one of ['cpu', 'cuda', 'auto']. If 'auto' (default) then cuda:0 device is selected if a GPU is detected.",
                         default="auto")
+    parser.add_argument(
+        "--num-graph-workers",
+        default="auto",
+        help="CPU workers used to construct MolE graph mini-batches.",
+    )
+    parser.add_argument(
+        "--graph-batch-size",
+        type=int,
+        default=1024,
+        help="Mini-batch size used for graph construction and MolE forward passes.",
+    )
+    parser.add_argument(
+        "--prefetch-batches",
+        type=int,
+        default=2,
+        help="Prefetched graph mini-batches per worker.",
+    )
+    parser.add_argument(
+        "--deterministic-representation",
+        action="store_true",
+        help="Force deterministic CUDA MolE forward passes for reproducibility checks.",
+    )
 
     # Parse arguments
     args = parser.parse_args()
@@ -74,7 +96,7 @@ def parse_arguments():
 
 
 # A FUNCTION TO READ SMILES from file 
-def read_smiles(data_path, smile_col="rdkit_no_salt", id_col="prestwick_ID"):
+def read_smiles(data_path, smile_col="rdkit_no_salt", id_col="prestwick_ID", validate_smiles=True):
 
     """
     Read SMILES data from a file or DataFrame and remove invalid SMILES.
@@ -102,7 +124,8 @@ def read_smiles(data_path, smile_col="rdkit_no_salt", id_col="prestwick_ID"):
     smile_df = smile_df.dropna()
 
     # Remove invalid smiles
-    smile_df = smile_df[smile_df[smile_col].apply(lambda x: Chem.MolFromSmiles(x) is not None)]
+    if validate_smiles:
+        smile_df = smile_df[smile_df[smile_col].apply(lambda x: Chem.MolFromSmiles(x) is not None)]
 
     return smile_df
 
@@ -122,7 +145,9 @@ def load_pretrained_model(pretrained_model_dir, device="cuda:0"):
     """
 
     # Read model configuration
-    config = yaml.load(open(os.path.join(pretrained_model_dir, "config.yaml"), "r"), Loader=yaml.FullLoader)
+    config_path = os.path.join(pretrained_model_dir, "config.yaml")
+    with open(config_path, "r", encoding="utf-8") as config_file:
+        config = yaml.load(config_file, Loader=yaml.FullLoader)
     model_config = config["model"]
 
     # Instantiate model
@@ -138,7 +163,20 @@ def load_pretrained_model(pretrained_model_dir, device="cuda:0"):
     return model
 
 
-def process_representation(dataset_path, smile_column_str, id_column_str, pretrained_dir, device, model=None):
+def process_representation(
+    dataset_path,
+    smile_column_str,
+    id_column_str,
+    pretrained_dir,
+    device,
+    model=None,
+    num_graph_workers="auto",
+    graph_batch_size=1024,
+    prefetch_batches=2,
+    validate_smiles=True,
+    enable_profiling=False,
+    deterministic_representation=False,
+):
 
     """
     Process the dataset to generate molecular representations.
@@ -156,7 +194,12 @@ def process_representation(dataset_path, smile_column_str, id_column_str, pretra
     """
 
     # First we read the SMILES dataframe
-    smiles_df = read_smiles(dataset_path, smile_col=smile_column_str, id_col=id_column_str)
+    smiles_df = read_smiles(
+        dataset_path,
+        smile_col=smile_column_str,
+        id_col=id_column_str,
+        validate_smiles=validate_smiles,
+    )
 
     # Load the pre-trained model if not provided
     if model is None:
@@ -165,7 +208,18 @@ def process_representation(dataset_path, smile_column_str, id_column_str, pretra
         pmodel = model
 
     # Gather pre-trained representation
-    udl_representation = batch_representation(smiles_df, pmodel, smile_column_str, id_column_str, device=device)
+    udl_representation = batch_representation(
+        smiles_df,
+        pmodel,
+        smile_column_str,
+        id_column_str,
+        device=device,
+        num_graph_workers=num_graph_workers,
+        graph_batch_size=graph_batch_size,
+        prefetch_batches=prefetch_batches,
+        enable_profiling=enable_profiling,
+        deterministic_representation=deterministic_representation,
+    )
 
     return udl_representation
 
@@ -182,7 +236,11 @@ def main():
 
                                           
                                            pretrained_dir = args.mole_model,
-                                           device=args.device)
+                                           device=args.device,
+                                           num_graph_workers=args.num_graph_workers,
+                                           graph_batch_size=args.graph_batch_size,
+                                           prefetch_batches=args.prefetch_batches,
+                                           deterministic_representation=args.deterministic_representation)
     
     # Write MolE representation to output
     mole_representation.to_csv(args.output_filepath, sep='\t')

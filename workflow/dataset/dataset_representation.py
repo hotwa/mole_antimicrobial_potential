@@ -1,10 +1,14 @@
 import os
+import time
 import yaml
 import numpy as np
 import pandas as pd
+from contextlib import contextmanager
+import threading
 
 import torch
 from torch_geometric.data import Data, Dataset, Batch
+from torch_geometric.loader import DataLoader
 
 from rdkit import Chem
 from rdkit.Chem.rdchem import HybridizationType
@@ -42,6 +46,11 @@ BONDDIR_LIST = [
     Chem.rdchem.BondDir.ENDUPRIGHT,
     Chem.rdchem.BondDir.ENDDOWNRIGHT
 ]
+ATOM_INDEX = {atomic_num: index for index, atomic_num in enumerate(ATOM_LIST)}
+CHIRALITY_INDEX = {tag: index for index, tag in enumerate(CHIRALITY_LIST)}
+BOND_INDEX = {bond_type: index for index, bond_type in enumerate(BOND_LIST)}
+BONDDIR_INDEX = {bond_dir: index for index, bond_dir in enumerate(BONDDIR_LIST)}
+_DETERMINISTIC_TORCH_LOCK = threading.Lock()
 
 # A FUNCTION TO READ SMILES from file 
 def read_smiles(data_path, smile_col="rdkit_no_salt", id_col="prestwick_ID"):
@@ -221,57 +230,125 @@ class MoleculeDataset(Dataset):
     - id_column (str): Name of the column containing molecule IDs.
     """
 
-    def __init__(self, smile_df, smile_column, id_column):
+    def __init__(self, smile_df, smile_column, id_column, enable_profiling=False):
         super(Dataset, self).__init__()
 
         # Gather the SMILES and the corresponding IDs
         self.smiles_data = smile_df[smile_column].tolist()
         self.id_data = smile_df[id_column].tolist()
+        self.enable_profiling = enable_profiling
+        self._graph_cache = {}
 
-    def __getitem__(self, index):
-        # Get the molecule
-        mol = Chem.MolFromSmiles(self.smiles_data[index])
+    def _build_graph_payload(self, smiles):
+        parse_start = time.perf_counter() if self.enable_profiling else None
+        mol = Chem.MolFromSmiles(smiles)
+        parse_end = time.perf_counter() if self.enable_profiling else None
+
+        add_hs_start = time.perf_counter() if self.enable_profiling else None
         mol = Chem.AddHs(mol)
+        add_hs_end = time.perf_counter() if self.enable_profiling else None
 
-        #########################
-        # Get the molecule info #
-        #########################
-        type_idx = []
-        chirality_idx = []
-        atomic_number = []
+        atom_count = mol.GetNumAtoms()
+        atom_features_np = np.empty((atom_count, 2), dtype=np.int64)
+        atom_type_column = atom_features_np[:, 0]
+        atom_chirality_column = atom_features_np[:, 1]
+        has_unknown_atom = False
 
-        # Roberto: Might want to add more features later on. Such as atomic spin
-        for atom in mol.GetAtoms():
-            if atom.GetAtomicNum() == 0:
-                print(self.id_data[index])
+        atom_feature_start = time.perf_counter() if self.enable_profiling else None
+        for atom_index, atom in enumerate(mol.GetAtoms()):
+            atomic_num = atom.GetAtomicNum()
+            if atomic_num == 0:
+                has_unknown_atom = True
 
-            type_idx.append(ATOM_LIST.index(atom.GetAtomicNum()))
-            chirality_idx.append(CHIRALITY_LIST.index(atom.GetChiralTag()))
-            atomic_number.append(atom.GetAtomicNum())
+            atom_type_column[atom_index] = ATOM_INDEX[atomic_num]
+            atom_chirality_column[atom_index] = CHIRALITY_INDEX[atom.GetChiralTag()]
+        atom_feature_end = time.perf_counter() if self.enable_profiling else None
+        x = torch.from_numpy(atom_features_np)
 
-        x1 = torch.tensor(type_idx, dtype=torch.long).view(-1,1)
-        x2 = torch.tensor(chirality_idx, dtype=torch.long).view(-1,1)
-        x = torch.cat([x1, x2], dim=-1)
+        bond_count = mol.GetNumBonds()
+        edge_index = torch.empty((2, bond_count * 2), dtype=torch.long)
+        if bond_count == 0:
+            edge_attr = torch.empty((0,), dtype=torch.long)
+        else:
+            edge_index_np = np.empty((2, bond_count * 2), dtype=np.int64)
+            edge_attr_np = np.empty((bond_count * 2, 2), dtype=np.int64)
+            edge_index0 = edge_index_np[0]
+            edge_index1 = edge_index_np[1]
+            edge_attr0 = edge_attr_np[:, 0]
+            edge_attr1 = edge_attr_np[:, 1]
 
-        row, col, edge_feat = [], [], []
+        bond_feature_start = time.perf_counter() if self.enable_profiling else None
+        edge_offset = 0
         for bond in mol.GetBonds():
             start, end = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
-            row += [start, end]
-            col += [end, start]
-            edge_feat.append([
-                BOND_LIST.index(bond.GetBondType()),
-                BONDDIR_LIST.index(bond.GetBondDir())
-            ])
-            edge_feat.append([
-                BOND_LIST.index(bond.GetBondType()),
-                BONDDIR_LIST.index(bond.GetBondDir())
-            ])
+            bond_type_idx = BOND_INDEX[bond.GetBondType()]
+            bond_dir_idx = BONDDIR_INDEX[bond.GetBondDir()]
 
-        edge_index = torch.tensor([row, col], dtype=torch.long)
-        edge_attr = torch.tensor(np.array(edge_feat), dtype=torch.long)
+            edge_index0[edge_offset] = start
+            edge_index1[edge_offset] = end
+            edge_attr0[edge_offset] = bond_type_idx
+            edge_attr1[edge_offset] = bond_dir_idx
+            edge_offset += 1
 
-        data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, 
-                    chem_id=self.id_data[index])
+            edge_index0[edge_offset] = end
+            edge_index1[edge_offset] = start
+            edge_attr0[edge_offset] = bond_type_idx
+            edge_attr1[edge_offset] = bond_dir_idx
+            edge_offset += 1
+        bond_feature_end = time.perf_counter() if self.enable_profiling else None
+
+        if bond_count > 0:
+            edge_index = torch.from_numpy(edge_index_np)
+            edge_attr = torch.from_numpy(edge_attr_np)
+
+        profile_timings = None
+        if self.enable_profiling:
+            profile_timings = (
+                parse_end - parse_start,
+                add_hs_end - add_hs_start,
+                atom_feature_end - atom_feature_start,
+                bond_feature_end - bond_feature_start,
+            )
+
+        return {
+            "x": x,
+            "edge_index": edge_index,
+            "edge_attr": edge_attr,
+            "has_unknown_atom": has_unknown_atom,
+        }, profile_timings
+
+    def __getitem__(self, index):
+        total_start = time.perf_counter() if self.enable_profiling else None
+        raw_smiles = self.smiles_data[index]
+        graph_payload = self._graph_cache.get(raw_smiles)
+        profile_timings = None
+
+        if graph_payload is None:
+            graph_payload, profile_timings = self._build_graph_payload(raw_smiles)
+            self._graph_cache[raw_smiles] = graph_payload
+        elif self.enable_profiling:
+            profile_timings = (0.0, 0.0, 0.0, 0.0)
+
+        if graph_payload["has_unknown_atom"]:
+            print(self.id_data[index])
+
+        data = Data(
+            x=graph_payload["x"].clone(),
+            edge_index=graph_payload["edge_index"].clone(),
+            edge_attr=graph_payload["edge_attr"].clone(),
+            chem_id=self.id_data[index],
+        )
+        if self.enable_profiling:
+            data.graph_profile = torch.tensor(
+                [[
+                    profile_timings[0],
+                    profile_timings[1],
+                    profile_timings[2],
+                    profile_timings[3],
+                    time.perf_counter() - total_start,
+                ]],
+                dtype=torch.float32,
+            )
         
         return data
 
@@ -421,7 +498,272 @@ def split_dataset(smile_df, valid_size, test_size, split_strategy, smile_col, id
     return smile_df
 
 # Function to generate the molecular representation with MolE
-def batch_representation(smile_df, dl_model, column_str, id_str, batch_size= 10_000, id_is_str=True, device="cuda:0"):
+def _resolve_graph_worker_count(num_graph_workers, dataset_size):
+    if dataset_size <= 0:
+        return 0
+
+    if isinstance(num_graph_workers, str):
+        if num_graph_workers != "auto":
+            num_graph_workers = int(num_graph_workers)
+        else:
+            available_cpus = os.cpu_count() or 1
+            num_graph_workers = max(1, available_cpus // 2)
+            if dataset_size <= 1:
+                num_graph_workers = 0
+
+    if num_graph_workers is None:
+        return 0
+
+    return max(0, min(int(num_graph_workers), dataset_size))
+
+
+def _resolve_prefetch_batches(prefetch_batches, num_graph_workers):
+    if num_graph_workers <= 0:
+        return None
+
+    if isinstance(prefetch_batches, str):
+        if prefetch_batches != "auto":
+            prefetch_batches = int(prefetch_batches)
+        else:
+            prefetch_batches = 2
+
+    if prefetch_batches is None:
+        return 2
+
+    return max(1, int(prefetch_batches))
+
+
+def _is_cuda_device(device):
+    if isinstance(device, torch.device):
+        return device.type == "cuda"
+
+    return str(device).startswith("cuda")
+
+
+@contextmanager
+def _representation_determinism(device, enabled=False):
+    if not enabled or not _is_cuda_device(device):
+        yield
+        return
+
+    with _DETERMINISTIC_TORCH_LOCK:
+        original_algorithms = torch.are_deterministic_algorithms_enabled()
+        original_cudnn_deterministic = torch.backends.cudnn.deterministic
+        original_cudnn_benchmark = torch.backends.cudnn.benchmark
+
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+        try:
+            yield
+        finally:
+            torch.use_deterministic_algorithms(original_algorithms)
+            torch.backends.cudnn.deterministic = original_cudnn_deterministic
+            torch.backends.cudnn.benchmark = original_cudnn_benchmark
+
+
+_REPRESENTATION_PROFILE_SUM_FIELDS = (
+    "graph_items",
+    "rdkit_parse_seconds",
+    "add_hs_seconds",
+    "atom_feature_seconds",
+    "bond_feature_seconds",
+    "graph_total_seconds",
+    "dataloader_setup_seconds",
+    "dataloader_iter_seconds",
+    "model_forward_seconds",
+)
+
+
+def _new_representation_profile(graph_batch_size, graph_workers):
+    return {
+        "graph_items": 0,
+        "rdkit_parse_seconds": 0.0,
+        "add_hs_seconds": 0.0,
+        "atom_feature_seconds": 0.0,
+        "bond_feature_seconds": 0.0,
+        "graph_total_seconds": 0.0,
+        "dataloader_setup_seconds": 0.0,
+        "dataloader_iter_seconds": 0.0,
+        "model_forward_seconds": 0.0,
+        "graph_batch_size": graph_batch_size,
+        "graph_workers": graph_workers,
+    }
+
+
+def _accumulate_representation_profile(total_profile, batch_profile):
+    for field in _REPRESENTATION_PROFILE_SUM_FIELDS:
+        total_profile[field] += batch_profile.get(field, 0.0)
+
+    if "graph_batch_size" in batch_profile:
+        total_profile["graph_batch_size"] = batch_profile["graph_batch_size"]
+    if "graph_workers" in batch_profile:
+        total_profile["graph_workers"] = batch_profile["graph_workers"]
+
+
+def _build_representation_loader(
+    smile_df,
+    column_str,
+    id_str,
+    batch_size,
+    num_graph_workers,
+    prefetch_batches,
+    device,
+    enable_profiling,
+):
+    dataloader_setup_start = time.perf_counter() if enable_profiling else None
+    molecular_graph_dataset = MoleculeDataset(
+        smile_df,
+        column_str,
+        id_str,
+        enable_profiling=enable_profiling,
+    )
+    dataset_size = len(molecular_graph_dataset)
+    graph_batch_size = int(batch_size)
+    resolved_workers = _resolve_graph_worker_count(num_graph_workers, dataset_size)
+    resolved_prefetch = _resolve_prefetch_batches(prefetch_batches, resolved_workers)
+    use_cuda_transfer = _is_cuda_device(device)
+
+    loader_kwargs = {
+        "dataset": molecular_graph_dataset,
+        "batch_size": graph_batch_size,
+        "shuffle": False,
+        "num_workers": resolved_workers,
+    }
+    if use_cuda_transfer:
+        loader_kwargs["pin_memory"] = True
+    if resolved_prefetch is not None:
+        loader_kwargs["prefetch_factor"] = resolved_prefetch
+    if resolved_workers > 0:
+        loader_kwargs["persistent_workers"] = True
+
+    dataloader_setup_seconds = 0.0
+    if enable_profiling:
+        dataloader_setup_seconds = time.perf_counter() - dataloader_setup_start
+
+    return (
+        DataLoader(**loader_kwargs),
+        graph_batch_size,
+        resolved_workers,
+        use_cuda_transfer,
+        dataloader_setup_seconds,
+    )
+
+
+def _profile_graph_batch(batch_profile, graph_batch):
+    graph_profile = getattr(graph_batch, "graph_profile", None)
+    if graph_profile is None:
+        return
+
+    graph_profile = graph_profile.view(-1, 5).sum(dim=0).tolist()
+    batch_profile["graph_items"] += int(len(getattr(graph_batch, "chem_id", [])))
+    batch_profile["rdkit_parse_seconds"] += float(graph_profile[0])
+    batch_profile["add_hs_seconds"] += float(graph_profile[1])
+    batch_profile["atom_feature_seconds"] += float(graph_profile[2])
+    batch_profile["bond_feature_seconds"] += float(graph_profile[3])
+    batch_profile["graph_total_seconds"] += float(graph_profile[4])
+
+
+def iter_batch_representation(
+    smile_df,
+    dl_model,
+    column_str,
+    id_str,
+    batch_size=10_000,
+    id_is_str=True,
+    device="cuda:0",
+    num_graph_workers=0,
+    graph_batch_size=None,
+    prefetch_batches=2,
+    enable_profiling=False,
+    deterministic_representation=False,
+):
+
+    """
+    Yield molecular representation mini-batches with optional profiling.
+
+    Each yielded item contains:
+    - batch_index: incremental mini-batch index
+    - chem_ids: list of chem_ids in the yielded embedding batch
+    - embedding_batch: pandas.DataFrame with embeddings indexed by chem_id
+    - profiling: per-batch profiling summary when enabled, otherwise None
+    """
+
+    del id_is_str
+
+    resolved_batch_size = int(graph_batch_size or batch_size)
+    (
+        molecular_graph_loader,
+        resolved_batch_size,
+        resolved_workers,
+        use_cuda_transfer,
+        dataloader_setup_seconds,
+    ) = _build_representation_loader(
+        smile_df=smile_df,
+        column_str=column_str,
+        id_str=id_str,
+        batch_size=resolved_batch_size,
+        num_graph_workers=num_graph_workers,
+        prefetch_batches=prefetch_batches,
+        device=device,
+        enable_profiling=enable_profiling,
+    )
+
+    dl_model.eval()
+    with _representation_determinism(device, deterministic_representation), torch.no_grad():
+        loader_iter = iter(molecular_graph_loader)
+        batch_index = 0
+        while True:
+            batch_profile = None
+            iter_start = time.perf_counter() if enable_profiling else None
+            try:
+                graph_batch = next(loader_iter)
+            except StopIteration:
+                break
+
+            if enable_profiling:
+                batch_profile = _new_representation_profile(
+                    graph_batch_size=resolved_batch_size,
+                    graph_workers=resolved_workers,
+                )
+                batch_profile["dataloader_setup_seconds"] = (
+                    dataloader_setup_seconds if batch_index == 0 else 0.0
+                )
+                batch_profile["dataloader_iter_seconds"] = time.perf_counter() - iter_start
+                _profile_graph_batch(batch_profile, graph_batch)
+
+            forward_start = time.perf_counter() if enable_profiling else None
+            graph_batch = graph_batch.to(device, non_blocking=use_cuda_transfer)
+            h_representation, _ = dl_model(graph_batch)
+            if enable_profiling:
+                batch_profile["model_forward_seconds"] = time.perf_counter() - forward_start
+
+            chem_ids = list(graph_batch.chem_id)
+            batch_df = pd.DataFrame(h_representation.cpu().numpy(), index=chem_ids)
+            yield {
+                "batch_index": batch_index,
+                "chem_ids": chem_ids,
+                "embedding_batch": batch_df,
+                "profiling": batch_profile,
+            }
+            batch_index += 1
+
+
+def batch_representation(
+    smile_df,
+    dl_model,
+    column_str,
+    id_str,
+    batch_size=10_000,
+    id_is_str=True,
+    device="cuda:0",
+    num_graph_workers=0,
+    graph_batch_size=None,
+    prefetch_batches=2,
+    enable_profiling=False,
+    deterministic_representation=False,
+):
 
     """
     Generate molecular representations using a Deep Learning model.
@@ -439,56 +781,38 @@ def batch_representation(smile_df, dl_model, column_str, id_str, batch_size= 10_
     - chem_representation (pandas.DataFrame): DataFrame containing molecular representations.
     """
     
-    # First we create a list of graphs
-    molecular_graph_dataset = MoleculeDataset(smile_df, column_str, id_str)
-    graph_list = [g for g in molecular_graph_dataset]
-
-    # Determine number of loops to do given the batch size
-    n_batches = len(graph_list) // batch_size
-
-    # Are all molecules accounted for?
-    remaining_molecules = len(graph_list) % batch_size
-
-    # Starting indices
-    start, end = 0, batch_size
-
-    # Determine number of iterations
-    if remaining_molecules == 0:
-        n_iter = n_batches
-    
-    elif remaining_molecules > 0:
-        n_iter = n_batches + 1
-    
-    # A list to store the batch dataframes
+    resolved_batch_size = int(graph_batch_size or batch_size)
+    profiling = (
+        _new_representation_profile(
+            graph_batch_size=resolved_batch_size,
+            graph_workers=0,
+        )
+        if enable_profiling
+        else None
+    )
     batch_dataframes = []
+    for batch in iter_batch_representation(
+        smile_df=smile_df,
+        dl_model=dl_model,
+        column_str=column_str,
+        id_str=id_str,
+        batch_size=batch_size,
+        id_is_str=id_is_str,
+        device=device,
+        num_graph_workers=num_graph_workers,
+        graph_batch_size=graph_batch_size,
+        prefetch_batches=prefetch_batches,
+        enable_profiling=enable_profiling,
+        deterministic_representation=deterministic_representation,
+    ):
+        batch_dataframes.append(batch["embedding_batch"])
+        if enable_profiling and profiling is not None and batch["profiling"] is not None:
+            _accumulate_representation_profile(profiling, batch["profiling"])
 
-    # Iterate over the batches
-    for i in range(n_iter):
-        # Start batch object
-        batch_obj = Batch()
-        graph_batch = batch_obj.from_data_list(graph_list[start:end])
-        graph_batch = graph_batch.to(device)
-
-        # Gather the representation
-        with torch.no_grad():
-            dl_model.eval()
-            h_representation, _ = dl_model(graph_batch)
-            chem_ids = graph_batch.chem_id
-        
-        batch_df = pd.DataFrame(h_representation.cpu().numpy(), index=chem_ids)
-        batch_dataframes.append(batch_df)
-
-        # Get the next batch
-        ## In the final iteration we want to get all the remaining molecules
-        if i == n_iter - 2:
-            start = end
-            end = len(graph_list)
-        else:
-            start = end
-            end = end + batch_size
-    
     # Concatenate the dataframes
     chem_representation = pd.concat(batch_dataframes)
+    if enable_profiling and profiling is not None:
+        chem_representation.attrs["profiling"] = profiling
 
     return chem_representation
 
