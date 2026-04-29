@@ -1,0 +1,96 @@
+{
+  "input_dir": "data/10.macrolide_xenobiotic_esterification_2dqsar",
+  "combined_output": "data/10.macrolide_xenobiotic_esterification_2dqsar/macrolide_esterification_mole_aggregate_predictions.csv",
+  "app_threshold": 0.04374140128493309,
+  "min_nkill": 10,
+  "prediction_columns": [
+    "apscore_total",
+    "apscore_gnegative",
+    "apscore_gpositive",
+    "ginhib_total",
+    "ginhib_gnegative",
+    "ginhib_gpositive",
+    "broad_spectrum"
+  ],
+  "total_rows": 2940,
+  "broad_spectrum_count": 2940,
+  "per_file": {
+    "tildipirosin_esterification_products_2dqsar.csv": {
+      "rows": 588,
+      "output": "data/10.macrolide_xenobiotic_esterification_2dqsar/tildipirosin_esterification_products_2dqsar_with_mole_predictions.csv",
+      "broad_spectrum_count": 588,
+      "ginhib_total_min": 20,
+      "ginhib_total_max": 40,
+      "apscore_total_min": -3.1229522228240967,
+      "apscore_total_max": -0.46275222301483154
+    },
+    "tilmicosin_esterification_products_2dqsar.csv": {
+      "rows": 784,
+      "output": "data/10.macrolide_xenobiotic_esterification_2dqsar/tilmicosin_esterification_products_2dqsar_with_mole_predictions.csv",
+      "broad_spectrum_count": 784,
+      "ginhib_total_min": 22,
+      "ginhib_total_max": 40,
+      "apscore_total_min": -3.083740234375,
+      "apscore_total_max": -0.49930280447006226
+    },
+    "tylosin_esterification_products_2dqsar.csv": {
+      "rows": 980,
+      "output": "data/10.macrolide_xenobiotic_esterification_2dqsar/tylosin_esterification_products_2dqsar_with_mole_predictions.csv",
+      "broad_spectrum_count": 980,
+      "ginhib_total_min": 23,
+      "ginhib_total_max": 40,
+      "apscore_total_min": -2.9516282081604004,
+      "apscore_total_max": -0.5141933560371399
+    },
+    "tylvalosin_esterification_products_2dqsar.csv": {
+      "rows": 588,
+      "output": "data/10.macrolide_xenobiotic_esterification_2dqsar/tylvalosin_esterification_products_2dqsar_with_mole_predictions.csv",
+      "broad_spectrum_count": 588,
+      "ginhib_total_min": 15,
+      "ginhib_total_max": 40,
+      "apscore_total_min": -3.5101065635681152,
+      "apscore_total_max": -0.9119848012924194
+    }
+  },
+  "runtime_seconds": 25.14943026100002,
+  "runtime": {
+    "gpu_name": "NVIDIA GeForce RTX 2080 Ti",
+    "device": "cuda:0",
+    "torch_version": "2.5.1+cu121",
+    "total_memory_bytes": 23069917184,
+    "free_memory_bytes": 5698355200,
+    "selected_batch_size": 128,
+    "used_cuda": true,
+    "deterministic_representation": false,
+    "classifier_workers": 6,
+    "classifier_inflight_batches": 7,
+    "classifier_backend": "pickle",
+    "classifier_backend_preference": "pickle",
+    "classifier_backend_path": "/home/lingyuzeng/project/mole_antimicrobial_potential/data/03.model_evaluation/MolE-XGBoost-08.03.2024_14.20.pkl",
+    "last_profile": {
+      "representation_seconds": 13.59003792500016,
+      "strain_expand_seconds": 0.344123081999669,
+      "xgboost_seconds": 1.472423999000057,
+      "prediction_frame_seconds": 0.0,
+      "growth_inhibition_seconds": 0.013989778999530245,
+      "aggregate_scores_seconds": 5.349539724999886,
+      "classifier_stage_seconds": 7.180385661000173,
+      "classifier_workers": 6,
+      "classifier_inflight_batches": 7,
+      "result_records_seconds": 0.04842220100033501,
+      "graph_build": {
+        "graph_items": 2940,
+        "rdkit_parse_seconds": 1.7796356361359358,
+        "add_hs_seconds": 0.6066462323069572,
+        "atom_feature_seconds": 2.7181309685111046,
+        "bond_feature_seconds": 4.1230383887887,
+        "graph_total_seconds": 12.256532654166222,
+        "dataloader_setup_seconds": 0.005280692000042109,
+        "dataloader_iter_seconds": 12.588037306999695,
+        "model_forward_seconds": 0.7100792170000432,
+        "graph_batch_size": 64,
+        "graph_workers": 0
+      }
+    }
+  }
+}
