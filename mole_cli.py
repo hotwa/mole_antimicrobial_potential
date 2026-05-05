@@ -17,6 +17,7 @@ import torch
 
 from src.batch_screening import screen_path
 from src.mole_representation import process_representation
+from src.panel_scoring import load_panel_config, compute_panel_scores_from_dataframe
 from src.preprocess_screening_input import preprocess_to_parquet
 from src.screening_process_pipeline import process_screen_config_from_args, screen_paths_multiprocess
 from src.stream_enumeration_screen import (
@@ -262,6 +263,31 @@ def _build_parser() -> argparse.ArgumentParser:
     screen.set_defaults(aggregate_scores=True)
     screen.add_argument("--app-threshold", type=float, default=0.04374140128493309, help="Growth inhibition threshold")
     screen.add_argument("--min-nkill", type=int, default=10, help="Broad-spectrum threshold")
+
+    panel_group = screen.add_argument_group("Pathogen panel scoring")
+    panel_group.add_argument(
+        "--panel-file",
+        default=None,
+        help="Path to pathogen-selective panel JSON config. Enables panel scoring on aggregate output.",
+    )
+    panel_group.add_argument(
+        "--panel-lambda",
+        type=float,
+        default=None,
+        help="Override lambda (commensal penalty weight) from panel config.",
+    )
+    panel_group.add_argument(
+        "--panel-min-pathogen-hard",
+        type=int,
+        default=None,
+        help="Minimum pathogen_hard count to retain a hit when --panel-file is set.",
+    )
+    panel_group.add_argument(
+        "--panel-min-selectivity",
+        type=float,
+        default=None,
+        help="Minimum selectivity_score to retain a hit when --panel-file is set.",
+    )
 
     tune_group = screen.add_argument_group("Tuning")
     tune_group.add_argument(
@@ -639,6 +665,64 @@ def _command_benchmark_screening_inputs(args: argparse.Namespace) -> int:
     return 0
 
 
+def _apply_panel_scoring_to_predictions(
+    *,
+    predictions_path: Path,
+    panel_config,
+    lambda_override: float | None,
+    min_pathogen_hard: int | None,
+    min_selectivity: float | None,
+) -> dict[str, Any]:
+    """Compute panel scores on aggregate predictions and optionally filter rows."""
+    from src.panel_scoring import compute_panel_scores_from_dataframe
+
+    df = pd.read_csv(predictions_path, sep="\t")
+    if "pred_id" in df.columns:
+        per_strain_df = df
+    else:
+        split = df["chem_id"].astype(str) + ":" + df["strain_name"].astype(str)
+        per_strain_df = df.copy()
+        per_strain_df["pred_id"] = split
+
+    scores = compute_panel_scores_from_dataframe(
+        per_strain_df,
+        panel_config,
+        pred_id_col="pred_id",
+        probability_col="1",
+        lambda_=lambda_override,
+    )
+    scores = scores.reset_index()
+    df = df.merge(scores, on="chem_id", how="left")
+
+    rows_before = len(df)
+    if min_pathogen_hard is not None or min_selectivity is not None:
+        mask = pd.Series(True, index=df.index)
+        if min_pathogen_hard is not None:
+            mask &= df["pathogen_hard"] >= min_pathogen_hard
+        if min_selectivity is not None:
+            mask &= df["selectivity_score"] >= min_selectivity
+        if "broad_spectrum" in df.columns:
+            mask |= df["broad_spectrum"] == 1
+        df = df[mask].copy()
+
+    df.to_csv(predictions_path, sep="\t", index=False)
+    return {
+        "panel_scoring": {
+            "panel_label": panel_config.label,
+            "panel_mode": panel_config.mode,
+            "pathogen_count": len(panel_config.pathogen_panel),
+            "commensal_count": len(panel_config.commensal_sparing_panel),
+            "lambda": float(lambda_override if lambda_override is not None else panel_config.lambda_),
+            "threshold": panel_config.app_threshold,
+            "tau": panel_config.tau,
+            "min_pathogen_hard": min_pathogen_hard,
+            "min_selectivity": min_selectivity,
+            "rows_before_filter": rows_before,
+            "rows_after_filter": len(df),
+        }
+    }
+
+
 def _command_screen(args: argparse.Namespace) -> int:
     async def _run() -> dict[str, Any]:
         _apply_classifier_backend_arg(args)
@@ -801,6 +885,31 @@ def _command_screen(args: argparse.Namespace) -> int:
                 "prediction_runtime": process_summary.get("prediction_runtime"),
                 "runtime": process_summary["runtime"],
             }
+
+        panel_file = getattr(args, "panel_file", None)
+        if panel_file:
+            panel_config = load_panel_config(panel_file)
+            panel_info = {
+                "panel_file": str(Path(panel_file).expanduser().resolve()),
+                "panel_label": panel_config.label,
+                "panel_mode": panel_config.mode,
+                "pathogen_count": len(panel_config.pathogen_panel),
+                "commensal_count": len(panel_config.commensal_sparing_panel),
+                "lambda": float(getattr(args, "panel_lambda", None) or panel_config.lambda_),
+                "tau": panel_config.tau,
+                "threshold": panel_config.app_threshold,
+            }
+            if process_config.execution_mode == "thread" and args.aggregate_scores:
+                panel_result = _apply_panel_scoring_to_predictions(
+                    predictions_path=summary.predictions_all_path,
+                    panel_config=panel_config,
+                    lambda_override=getattr(args, "panel_lambda", None),
+                    min_pathogen_hard=getattr(args, "panel_min_pathogen_hard", None),
+                    min_selectivity=getattr(args, "panel_min_selectivity", None),
+                )
+                panel_info.update(panel_result["panel_scoring"])
+            manifest["panel"] = panel_info
+
         (output_dir / "manifest.json").write_text(
             json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",

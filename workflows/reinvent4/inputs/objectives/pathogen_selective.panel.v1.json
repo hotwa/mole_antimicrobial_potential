@@ -1,0 +1,29 @@
+{
+  "mode": "pathogen_selective",
+  "label": "pathogen_selective_v1",
+  "description": "Selective antimicrobial panel: primary pathogens, secondary pathogens, and commensal sparing",
+  "app_threshold": 0.04374140128493309,
+  "tau": 0.02,
+  "lambda": 0.5,
+  "primary_pathogen_panel": [
+    "Clostridium difficile (NT5083)",
+    "Clostridium perfringens (NT5032)",
+    "Bacteroides fragilis (ET) (NT5033)",
+    "Fusobacterium nucleatum (NT5025)"
+  ],
+  "secondary_pathogen_panel": [
+    "Bacteroides fragilis (NT) (NT5003)",
+    "Bilophila wadsworthia (NT5036)",
+    "Ruminococcus gnavus (NT5046)"
+  ],
+  "commensal_sparing_panel": [
+    "Akkermansia muciniphila (NT5021)",
+    "Bifidobacterium longum (NT5028)",
+    "Bifidobacterium adolescentis (NT5022)",
+    "Lactobacillus paracasei (NT5042)",
+    "Eubacterium rectale (NT5009)",
+    "Roseburia intestinalis (NT5011)",
+    "Roseburia hominis (NT5079)",
+    "Ruminococcus bromii (NT5045)"
+  ]
+}
