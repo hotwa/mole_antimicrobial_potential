@@ -363,19 +363,19 @@ class AntimicrobialPredictor:
         sorted_growth_inhibition = growth_inhibition[order]
         inhibition_dtype = growth_inhibition.dtype
 
-        def _log_gmean_rows(values: np.ndarray) -> np.ndarray:
+        def _log2_gmean_rows(values: np.ndarray) -> np.ndarray:
             output_dtype = values.dtype if np.issubdtype(values.dtype, np.floating) else np.float64
             with np.errstate(divide="ignore", invalid="ignore"):
                 return np.fromiter(
-                    (float(np.log(gmean(row))) for row in values),
+                    (float(np.log2(gmean(row))) for row in values),
                     dtype=output_dtype,
                     count=values.shape[0],
                 )
 
         with np.errstate(divide="ignore", invalid="ignore"):
-            apscore_total = _log_gmean_rows(sorted_probabilities)
-            apscore_gnegative = _log_gmean_rows(sorted_probabilities[:, negative_mask])
-            apscore_gpositive = _log_gmean_rows(sorted_probabilities[:, positive_mask])
+            apscore_total = _log2_gmean_rows(sorted_probabilities)
+            apscore_gnegative = _log2_gmean_rows(sorted_probabilities[:, negative_mask])
+            apscore_gpositive = _log2_gmean_rows(sorted_probabilities[:, positive_mask])
 
         result = pd.DataFrame(
             {
@@ -400,7 +400,7 @@ class AntimicrobialPredictor:
         apscore_total = (
             pred_df.groupby("chem_id")["1"].apply(gmean).to_frame().rename(columns={"1": "apscore_total"})
         )
-        apscore_total["apscore_total"] = np.log(apscore_total["apscore_total"])
+        apscore_total["apscore_total"] = np.log2(apscore_total["apscore_total"])
 
         apscore_gram = (
             pred_df.groupby(["chem_id", "gram_stain"])["1"]
@@ -408,8 +408,8 @@ class AntimicrobialPredictor:
             .unstack()
             .rename(columns={"negative": "apscore_gnegative", "positive": "apscore_gpositive"})
         )
-        apscore_gram["apscore_gnegative"] = np.log(apscore_gram["apscore_gnegative"])
-        apscore_gram["apscore_gpositive"] = np.log(apscore_gram["apscore_gpositive"])
+        apscore_gram["apscore_gnegative"] = np.log2(apscore_gram["apscore_gnegative"])
+        apscore_gram["apscore_gpositive"] = np.log2(apscore_gram["apscore_gpositive"])
 
         inhibted_total = (
             pred_df.groupby("chem_id")["growth_inhibition"]
