@@ -1,0 +1,138 @@
+{
+  "input_path": "/home/lingyuzeng/project/mole_antimicrobial_potential/data/09.qsar_smiles/QSAR-104-SMILES.xlsx",
+  "sheet": 0,
+  "output_directory": "/home/lingyuzeng/project/mole_antimicrobial_potential/data/09.qsar_smiles/analysis",
+  "n_molecules": 104,
+  "n_strains": 40,
+  "n_mole_features": 43,
+  "app_threshold": 0.04374140128493309,
+  "min_nkill": 10,
+  "prediction_batch_size": 16,
+  "graph_batch_size": 256,
+  "num_graph_workers": "auto",
+  "prefetch_batches": 2,
+  "classifier_workers": "auto",
+  "classifier_inflight_batches": "auto",
+  "bootstrap_iterations": 1000,
+  "bootstrap_seed": 20260424,
+  "device": "auto",
+  "deterministic_representation": false,
+  "python_version": "3.10.20 | packaged by conda-forge | (main, Mar  5 2026, 16:42:22) [GCC 14.3.0]",
+  "platform": "Linux-6.17.0-20-generic-x86_64-with-glibc2.39",
+  "top_10_directional_spearman": [
+    {
+      "feature": "Eubacterium rectale (NT5009)",
+      "feature_type": "strain_probability",
+      "gram_group": "positive",
+      "is_ecoli": false,
+      "spearman_rho": 0.4792130134312167,
+      "spearman_q": 1.142101187592764e-05,
+      "directional_spearman_rho": 0.4792130134312167,
+      "rank_by_directional_spearman": 1
+    },
+    {
+      "feature": "Eggerthella lenta (NT5024)",
+      "feature_type": "strain_probability",
+      "gram_group": "positive",
+      "is_ecoli": false,
+      "spearman_rho": 0.33192495082465234,
+      "spearman_q": 0.012405452388562851,
+      "directional_spearman_rho": 0.33192495082465234,
+      "rank_by_directional_spearman": 2
+    },
+    {
+      "feature": "Akkermansia muciniphila (NT5021)",
+      "feature_type": "strain_probability",
+      "gram_group": "negative",
+      "is_ecoli": false,
+      "spearman_rho": 0.31430415793865574,
+      "spearman_q": 0.016581923062895597,
+      "directional_spearman_rho": 0.31430415793865574,
+      "rank_by_directional_spearman": 3
+    },
+    {
+      "feature": "Escherichia coli ED1a (NT5078)",
+      "feature_type": "strain_probability",
+      "gram_group": "negative",
+      "is_ecoli": true,
+      "spearman_rho": 0.28853181448353915,
+      "spearman_q": 0.03197810636502978,
+      "directional_spearman_rho": 0.28853181448353915,
+      "rank_by_directional_spearman": 4
+    },
+    {
+      "feature": "Bifidobacterium longum (NT5028)",
+      "feature_type": "strain_probability",
+      "gram_group": "positive",
+      "is_ecoli": false,
+      "spearman_rho": 0.28204471664842806,
+      "spearman_q": 0.032023197427701496,
+      "directional_spearman_rho": 0.28204471664842806,
+      "rank_by_directional_spearman": 5
+    },
+    {
+      "feature": "Bacteroides thetaiotaomicron (NT5004)",
+      "feature_type": "strain_probability",
+      "gram_group": "negative",
+      "is_ecoli": false,
+      "spearman_rho": 0.272842213551745,
+      "spearman_q": 0.03637467609353108,
+      "directional_spearman_rho": 0.272842213551745,
+      "rank_by_directional_spearman": 6
+    },
+    {
+      "feature": "Parabacteroides merdae (NT5071)",
+      "feature_type": "strain_probability",
+      "gram_group": "negative",
+      "is_ecoli": false,
+      "spearman_rho": 0.23104951253179404,
+      "spearman_q": 0.11232134634390216,
+      "directional_spearman_rho": 0.23104951253179404,
+      "rank_by_directional_spearman": 7
+    },
+    {
+      "feature": "Eubacterium eligens (NT5075)",
+      "feature_type": "strain_probability",
+      "gram_group": "positive",
+      "is_ecoli": false,
+      "spearman_rho": 0.19930221054433836,
+      "spearman_q": 0.20318575314915793,
+      "directional_spearman_rho": 0.19930221054433836,
+      "rank_by_directional_spearman": 8
+    },
+    {
+      "feature": "Bacteroides caccae (NT5050)",
+      "feature_type": "strain_probability",
+      "gram_group": "negative",
+      "is_ecoli": false,
+      "spearman_rho": 0.1776109771581856,
+      "spearman_q": 0.3064550907744674,
+      "directional_spearman_rho": 0.1776109771581856,
+      "rank_by_directional_spearman": 9
+    },
+    {
+      "feature": "Escherichia coli IAI1 (NT5077)",
+      "feature_type": "strain_probability",
+      "gram_group": "negative",
+      "is_ecoli": true,
+      "spearman_rho": 0.16266824604293384,
+      "spearman_q": 0.35614117082067787,
+      "directional_spearman_rho": 0.16266824604293384,
+      "rank_by_directional_spearman": 10
+    }
+  ],
+  "output_paths": {
+    "matrix": "/home/lingyuzeng/project/mole_antimicrobial_potential/data/09.qsar_smiles/analysis/qsar104_mole_prediction_matrix.csv",
+    "matrix_metadata": "/home/lingyuzeng/project/mole_antimicrobial_potential/data/09.qsar_smiles/analysis/qsar104_mole_prediction_matrix_with_metadata.csv",
+    "correlations": "/home/lingyuzeng/project/mole_antimicrobial_potential/data/09.qsar_smiles/analysis/qsar104_pmic_correlations.csv",
+    "ecoli_correlations": "/home/lingyuzeng/project/mole_antimicrobial_potential/data/09.qsar_smiles/analysis/qsar104_ecoli_correlations.csv",
+    "feature_summary": "/home/lingyuzeng/project/mole_antimicrobial_potential/data/09.qsar_smiles/analysis/qsar104_feature_summary.csv",
+    "manifest": "/home/lingyuzeng/project/mole_antimicrobial_potential/data/09.qsar_smiles/analysis/qsar104_analysis_manifest.json",
+    "report": "/home/lingyuzeng/project/mole_antimicrobial_potential/data/09.qsar_smiles/analysis/EXPERIMENT_REPORT.md",
+    "trend_original": "/home/lingyuzeng/project/mole_antimicrobial_potential/data/09.qsar_smiles/analysis/qsar104_trend_original_order_aligned_zscore.png",
+    "trend_sorted": "/home/lingyuzeng/project/mole_antimicrobial_potential/data/09.qsar_smiles/analysis/qsar104_trend_pmic_sorted_aligned_zscore.png",
+    "spearman_barplot": "/home/lingyuzeng/project/mole_antimicrobial_potential/data/09.qsar_smiles/analysis/qsar104_spearman_correlation_barplot.png",
+    "key_scatterplots": "/home/lingyuzeng/project/mole_antimicrobial_potential/data/09.qsar_smiles/analysis/qsar104_key_scatterplots.png",
+    "feature_heatmap": "/home/lingyuzeng/project/mole_antimicrobial_potential/data/09.qsar_smiles/analysis/qsar104_mole_feature_spearman_heatmap.png"
+  }
+}
