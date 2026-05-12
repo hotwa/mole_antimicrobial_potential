@@ -28,6 +28,8 @@ This is a different design strategy compared to the esterification approach in
 
 - `tylosin_seed_amine_products.csv`: 114 unique reductive amination products for Tylosin
 - `tylvalosin_seed_amine_products.csv`: 114 unique reductive amination products for Tylvalosin
+- `tylosin_seed_amine_products_with_mole_predictions.csv`: Tylosin products with MolE antimicrobial predictions
+- `tylvalosin_seed_amine_products_with_mole_predictions.csv`: Tylvalosin products with MolE antimicrobial predictions
 
 ## Column Descriptions
 
@@ -53,6 +55,34 @@ This is a different design strategy compared to the esterification approach in
 | `image_path` | Path to the product structure image |
 | `pMIC_pred(μmol/ml)` | Predicted pMIC from the 2D-QSAR model (rounded) |
 | `original_pMIC_pred(μmol/ml)` | Original predicted pMIC with full precision |
+
+## MolE Prediction Columns (in `_with_mole_predictions` files)
+
+The `_with_mole_predictions.csv` files contain the original columns plus the following
+MolE antimicrobial activity predictions:
+
+| Column | Description |
+|--------|-------------|
+| `apscore_total` | Antimicrobial potential score (log2 geometric mean of predictive probabilities) |
+| `apscore_gnegative` | Antimicrobial potential score for Gram-negative bacteria |
+| `apscore_gpositive` | Antimicrobial potential score for Gram-positive bacteria |
+| `ginhib_total` | Total number of strains predicted to be inhibited |
+| `ginhib_gnegative` | Number of Gram-negative strains predicted to be inhibited |
+| `ginhib_gpositive` | Number of Gram-positive strains predicted to be inhibited |
+| `broad_spectrum` | Broad-spectrum antibiotic prediction (1 if ginhib_total >= 10, else 0) |
+
+### Prediction Parameters
+
+- **Growth inhibition threshold (app_threshold)**: 0.04374140128493309
+- **Broad-spectrum threshold (min_nkill)**: 10 strains
+- **Classifier backend**: XGBoost pickle model
+
+### Prediction Summary
+
+| Scaffold | Products | Broad Spectrum | apscore_total Range | ginhib_total Range |
+|----------|----------|----------------|---------------------|-------------------|
+| Tylosin | 114 | 114 | -4.25 to -0.69 | 24 to 40 |
+| Tylvalosin | 114 | 114 | -3.80 to -1.55 | 30 to 39 |
 
 ## Notes on Multi-Amine Seeds
 
