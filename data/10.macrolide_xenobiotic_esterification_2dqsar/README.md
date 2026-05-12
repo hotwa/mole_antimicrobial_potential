@@ -60,6 +60,16 @@ Interpretation:
 
 The column name is kept unchanged to preserve traceability to the source files.
 
+## `raw/` Directory
+
+The `raw/` folder contains the original CSV files from the 2D-QSAR prediction
+workflow. Compared to the main directory CSVs, these files include an additional
+column `original_pMIC_pred（μmol/ml）` that stores the raw predicted pMIC values
+with more decimal places (higher precision) from Yuan Jie's 2D-QSAR model.
+
+Use these files when you need the unrounded prediction values for downstream
+analysis.
+
 ## File Notes
 
 - The CSVs are stored in an `ISO-8859-1` compatible encoding and are readable
